@@ -18,6 +18,7 @@ add_executable(LiveDesktop
     src/DesktopIcons.cpp
     src/Scene.cpp
     src/Effects.cpp
+    src/Meadow.cpp
     src/AppIcon.cpp
     src/Util.cpp
     src/Config.cpp

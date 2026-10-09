@@ -182,6 +182,17 @@ namespace ld
         if (m_layer && !m_paused) m_effects[m_current]->OnClick(m_ctx, m_layer, pos);
     }
 
+    void Scene::Tick()
+    {
+        if (m_layer && !m_paused) m_effects[m_current]->Tick(m_ctx, m_layer, false);
+    }
+
+    void Scene::SetTimeOverride(float hour)
+    {
+        m_ctx.timeOverride = hour;
+        if (m_layer) m_effects[m_current]->Tick(m_ctx, m_layer, true);
+    }
+
     void Scene::SetPaused(bool paused)
     {
         if (paused == m_paused || !m_ctx.compositor) return;

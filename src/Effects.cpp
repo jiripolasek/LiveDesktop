@@ -350,6 +350,7 @@ namespace ld
     std::vector<std::unique_ptr<Effect>> CreateEffects()
     {
         std::vector<std::unique_ptr<Effect>> effects;
+        effects.push_back(CreateMeadowEffect());
         effects.push_back(std::make_unique<AuroraEffect>(L"Aurora", AuroraPalette{
             { 0x06122E, 0x0E3B5C, 0x1B0F3B, 0x0B2A3F },
             { 0x2EF2B0, 0x3FA9F5, 0x9B5CF6 },

@@ -7,9 +7,13 @@ namespace ld
     using winrt::Windows::Foundation::Numerics::float2;
     using winrt::Windows::Foundation::Numerics::float3;
 
+    class Graphics;
+
     struct SceneContext
     {
         wuc::Compositor compositor{ nullptr };
+        Graphics* graphics = nullptr; // D2D/DirectWrite surfaces (may be null before initialization)
+        float timeOverride = -1.0f;   // local hour [0,24) forced via --send time:..., < 0 = real clock
         // Shared pointer state driven from the mouse hook:
         //   Position (Vector3, host pixels), Strength (0..1, 1 while hovering the desktop), Radius (px)
         wuc::CompositionPropertySet pointer{ nullptr };
@@ -25,9 +29,14 @@ namespace ld
         // Populate `layer` with visuals/animations. Everything should be composition-driven.
         virtual void Build(SceneContext const& ctx, wuc::ContainerVisual const& layer) = 0;
         virtual void OnClick(SceneContext const& ctx, wuc::ContainerVisual const& layer, float2 pos) = 0;
+        // Slow periodic update (every few seconds, not per frame). `jump` = the clock was overridden.
+        virtual void Tick(SceneContext const&, wuc::ContainerVisual const&, bool /*jump*/) {}
     };
 
     std::vector<std::unique_ptr<Effect>> CreateEffects();
+    std::unique_ptr<Effect> CreateMeadowEffect();
+    // Local hour for a named Meadow phase ("dawn", "golden", "night", "HH:MM"...). -1 = auto, -2 = invalid.
+    float MeadowPhaseHour(std::wstring const& name);
 
     class Scene
     {
@@ -44,6 +53,11 @@ namespace ld
         void Click(float2 pos);
         void SetPaused(bool paused);
         bool Paused() const { return m_paused; }
+        void SetGraphics(Graphics* graphics) { m_ctx.graphics = graphics; }
+        void Tick();
+        // Rebuilds the current effect in place (e.g. after the graphics device was replaced).
+        void Refresh() { Rebuild(false); }
+        void SetTimeOverride(float hour);
         void Shutdown();
 
         wuc::Compositor Compositor() const { return m_ctx.compositor; }

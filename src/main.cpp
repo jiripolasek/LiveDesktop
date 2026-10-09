@@ -630,6 +630,12 @@ namespace
         else if (cmd == L"next-scene") NextScene();
         else if (arg(L"scene:", value)) SetSceneOverride(value == L"auto" ? L"" : value);
         else if (arg(L"effect:", value)) { g_app.scene.SetEffect(static_cast<size_t>(_wtoi(value.c_str())) % g_app.scene.EffectCount()); UpdateTrayTip(); }
+        else if (arg(L"time:", value))
+        {
+            float hour = MeadowPhaseHour(value);
+            if (hour < -1.5f) Log(L"Unknown time '%s'", value.c_str());
+            else g_app.scene.SetTimeOverride(hour);
+        }
         else if (arg(L"dashboard:", value))
             SetDashboardMode(value == L"on" ? DashboardMode::On : value == L"off" ? DashboardMode::Off : DashboardMode::Auto);
         else if (arg(L"mock:", value)) SetMock(value == L"on");
@@ -809,6 +815,7 @@ namespace
             case TIMER_TICK:
                 if (!g_app.scene.Paused())
                 {
+                    g_app.scene.Tick();
                     g_app.ambient.Tick();
                     g_app.dashboard.Tick();
                 }
@@ -888,6 +895,7 @@ namespace
                 L"                            next-effect | effect:<n> | next-scene | scene:<name|auto>\n"
                 L"                            dashboard:on|off|auto | mock:on|off | ci:red|green|mixed\n"
                 L"                            log:error|ok | pause | stop | hit:<x>,<y>\n"
+                L"                            time:<dawn|sunrise|morning|day|afternoon|golden|sunset|dusk|night|HH:MM|auto>\n"
                 L"Ctrl+C, the tray menu 'Exit', or WM_CLOSE exit cleanly.\n"
                 L"Config: %%LOCALAPPDATA%%\\LiveDesktop\\config.json (created with defaults on first run).\n");
     }
@@ -1023,6 +1031,7 @@ int wmain(int argc, wchar_t** argv)
     try
     {
         g_app.graphics.Initialize(g_app.scene.Compositor());
+        g_app.scene.SetGraphics(&g_app.graphics);
     }
     catch (winrt::hresult_error const& e)
     {
@@ -1033,6 +1042,7 @@ int wmain(int argc, wchar_t** argv)
         Log(L"Graphics device replaced -> redrawing surfaces");
         g_app.ambient.RedrawAll();
         g_app.dashboard.RedrawAll();
+        g_app.scene.Refresh();
     };
     // The log tail is opt-in (config logTail.enabled + logPath); mock mode always demos it.
     Config providerConfig = g_app.config;
