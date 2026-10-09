@@ -4,6 +4,13 @@
 #include "DesktopHost.h"
 #include "DesktopIcons.h"
 #include "Scene.h"
+#include "Config.h"
+#include "Providers.h"
+#include "Graphics.h"
+#include "Ambient.h"
+#include "Dashboard.h"
+#include "Reveal.h"
+#include "Util.h"
 
 namespace ld { HICON CreateAppIcon(int size); }
 
@@ -18,16 +25,26 @@ namespace
     constexpr UINT WM_APP_POINTER = WM_APP + 2;
     constexpr UINT WM_APP_CLICK = WM_APP + 3;
     constexpr UINT WM_APP_HOST_LOST = WM_APP + 4;
+    constexpr UINT WM_APP_RELEASE = WM_APP + 5;
+    constexpr UINT WM_APP_REVEAL = WM_APP + 6;
 
     constexpr UINT_PTR TIMER_HEALTH = 1;
     constexpr UINT_PTR TIMER_REATTACH = 2;
     constexpr UINT_PTR TIMER_RELAYOUT = 3;
     constexpr UINT_PTR TIMER_AUTOEXIT = 4;
+    constexpr UINT_PTR TIMER_REVEAL = 5;
+    constexpr UINT_PTR TIMER_TICK = 6;
 
     constexpr UINT IDM_NEXT_EFFECT = 100;
     constexpr UINT IDM_PAUSE = 101;
     constexpr UINT IDM_EXIT = 102;
+    constexpr UINT IDM_MOCK = 103;
+    constexpr UINT IDM_DASHBOARD = 104;
+    constexpr UINT IDM_NEXT_SCENE = 105;
     constexpr UINT kTrayId = 1;
+    constexpr ULONG_PTR kCopyDataCommand = 0x4C44; // 'LD'
+
+    enum class DashboardMode { Auto, On, Off };
 
     struct Options
     {
@@ -35,6 +52,34 @@ namespace
         bool layered = false;
         bool refreshWallpaper = true;
         UINT exitAfterSeconds = 0;
+        bool mock = false;
+        std::wstring scene;          // forced scene (overrides the virtual-desktop mapping)
+        bool dashboard = false;      // start with the dashboard forced on
+    };
+
+    struct Providers
+    {
+        std::unique_ptr<SessionsProvider> sessions;
+        std::unique_ptr<GitHubProvider> github;
+        std::unique_ptr<SystemProvider> system;
+        std::unique_ptr<CalendarProvider> calendar;
+        std::unique_ptr<PortsProvider> ports;
+        std::unique_ptr<LogTailProvider> logTail;
+
+        template <class F> void ForEach(F&& f)
+        {
+            Provider* all[] = { sessions.get(), github.get(), system.get(), calendar.get(), ports.get(), logTail.get() };
+            for (auto* p : all) if (p) f(*p);
+        }
+    };
+
+    // Left-button press being tracked for a click on a dashboard card.
+    struct PendingClick
+    {
+        bool active = false;
+        POINT screen{};
+        ULONGLONG tick = 0;
+        Dashboard::Hit hit;
     };
 
     struct App
@@ -55,6 +100,24 @@ namespace
         std::wstring displaySignature;
         HANDLE hookThread = nullptr;
         DWORD hookThreadId = 0;
+
+        Config config;
+        Graphics graphics;
+        Ambient ambient;
+        Dashboard dashboard;
+        RevealMonitor reveal;
+        Providers providers;
+        VirtualDesktopWatcher desktops;
+        SceneLayout layout;
+        bool mock = false;
+        std::wstring sceneName = L"default";
+        std::wstring sceneOverride;        // tray / --scene / --send; cleared when the virtual desktop changes
+        VirtualDesktopInfo desktop;
+        DashboardMode dashboardMode = DashboardMode::Auto;
+        bool revealed = false;
+        bool occluded = false;
+        std::wstring revealReason;
+        PendingClick click;
     };
 
     App g_app;
@@ -87,6 +150,10 @@ namespace
                 else if (wParam == WM_LBUTTONDOWN)
                 {
                     PostMessageW(target, WM_APP_CLICK, static_cast<WPARAM>(info->pt.x), static_cast<LPARAM>(info->pt.y));
+                }
+                else if (wParam == WM_LBUTTONUP)
+                {
+                    PostMessageW(target, WM_APP_RELEASE, static_cast<WPARAM>(info->pt.x), static_cast<LPARAM>(info->pt.y));
                 }
             }
         }
@@ -174,10 +241,27 @@ namespace
         return covers;
     }
 
+    // Paused = nothing animates. "Heavy" pause (fullscreen app, or the desktop fully covered with no
+    // dashboard showing) also throttles the providers.
     void UpdatePaused()
     {
-        bool paused = g_app.userPaused || g_app.fullscreenPaused;
+        bool heavy = g_app.fullscreenPaused || (g_app.occluded && !g_app.dashboard.Visible());
+        bool paused = g_app.userPaused || heavy;
+        if (paused != g_app.scene.Paused())
+        {
+            Log(L"Rendering %s (user=%d fullscreen=%d occluded=%d dashboard=%d)", paused ? L"paused" : L"resumed",
+                g_app.userPaused, g_app.fullscreenPaused, g_app.occluded, g_app.dashboard.Visible());
+        }
         g_app.scene.SetPaused(paused);
+
+        static int lastThrottle = -1;
+        int throttle = heavy ? 4 : 1;
+        if (throttle != lastThrottle)
+        {
+            lastThrottle = throttle;
+            Provider* system = g_app.providers.system.get();
+            g_app.providers.ForEach([&](Provider& p) { p.SetThrottle(&p == system ? (heavy ? 0 : 1) : throttle); });
+        }
     }
 
     // Re-applies the user's current wallpaper so the desktop repaints it (needed on the classic layout,
@@ -214,8 +298,8 @@ namespace
         nid.hWnd = g_app.controller;
         nid.uID = kTrayId;
         nid.uFlags = NIF_TIP | NIF_SHOWTIP;
-        swprintf_s(nid.szTip, L"LiveDesktop - %s%s", g_app.scene.CurrentEffectName(),
-            g_app.userPaused ? L" (paused)" : L"");
+        swprintf_s(nid.szTip, L"LiveDesktop - %s, %s scene%s%s", g_app.scene.CurrentEffectName(), g_app.sceneName.c_str(),
+            g_app.mock ? L", mock" : L"", g_app.userPaused ? L" (paused)" : L"");
         Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 
@@ -254,6 +338,11 @@ namespace
         wchar_t next[128];
         swprintf_s(next, L"Next effect\t(current: %s)", g_app.scene.CurrentEffectName());
         AppendMenuW(menu, MF_STRING, IDM_NEXT_EFFECT, next);
+        wchar_t scene[128];
+        swprintf_s(scene, L"Next scene\t(current: %s)", g_app.sceneName.c_str());
+        AppendMenuW(menu, MF_STRING, IDM_NEXT_SCENE, scene);
+        AppendMenuW(menu, MF_STRING | (g_app.dashboardMode == DashboardMode::On ? MF_CHECKED : 0), IDM_DASHBOARD, L"Force dashboard");
+        AppendMenuW(menu, MF_STRING | (g_app.mock ? MF_CHECKED : 0), IDM_MOCK, L"Mock data");
         AppendMenuW(menu, MF_STRING | (g_app.userPaused ? MF_CHECKED : 0), IDM_PAUSE, L"Pause animations");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, IDM_EXIT, L"Exit");
@@ -271,6 +360,185 @@ namespace
     {
         SIZE s = g_app.host.Size();
         return float2(static_cast<float>(s.cx), static_cast<float>(s.cy));
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Layout, scenes, dashboard
+    // ---------------------------------------------------------------------------------------------
+    float2 ToLocal(POINT screen)
+    {
+        POINT p = g_app.host.ScreenToHost(screen);
+        return float2(static_cast<float>(p.x), static_cast<float>(p.y));
+    }
+
+    RECT RectToHost(RECT const& r)
+    {
+        POINT a = g_app.host.ScreenToHost(POINT{ r.left, r.top });
+        POINT b = g_app.host.ScreenToHost(POINT{ r.right, r.bottom });
+        return RECT{ a.x, a.y, b.x, b.y };
+    }
+
+    HMONITOR PrimaryMonitor(MONITORINFO& info)
+    {
+        HMONITOR monitor = MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
+        info = MONITORINFO{ sizeof(info) };
+        GetMonitorInfoW(monitor, &info);
+        return monitor;
+    }
+
+    std::vector<RECT> WorkAreas()
+    {
+        std::vector<RECT> areas;
+        EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR m, HDC, LPRECT, LPARAM param) -> BOOL {
+            MONITORINFO mi{ sizeof(mi) };
+            if (GetMonitorInfoW(m, &mi)) reinterpret_cast<std::vector<RECT>*>(param)->push_back(mi.rcWork);
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&areas));
+        return areas;
+    }
+
+    bool SameRects(std::vector<RECT> const& a, std::vector<RECT> const& b)
+    {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) if (!EqualRect(&a[i], &b[i])) return false;
+        return true;
+    }
+
+    // Recomputes the host-space layout (monitors, primary work area, DPI scale, icon cells) and pushes it
+    // to the ambient + dashboard layers if anything changed.
+    void ApplyLayout(bool force)
+    {
+        if (!g_app.host.IsAttached()) return;
+        SceneLayout layout;
+        layout.size = HostSize();
+        layout.monitors = g_app.host.MonitorRectsInHost();
+        MONITORINFO mi;
+        HMONITOR primary = PrimaryMonitor(mi);
+        layout.primary = RectToHost(mi.rcMonitor);
+        layout.primaryWork = RectToHost(mi.rcWork);
+        UINT dpiX = 96, dpiY = 96;
+        if (SUCCEEDED(GetDpiForMonitor(primary, MDT_EFFECTIVE_DPI, &dpiX, &dpiY))) layout.scale = dpiX / 96.0f;
+        std::vector<RECT> icons;
+        if (g_app.icons.IconRects(icons))
+        {
+            for (auto const& r : icons) layout.icons.push_back(RectToHost(r));
+        }
+        else
+        {
+            layout.icons = g_app.layout.icons; // keep the last known cells if Explorer is busy
+        }
+
+        auto const& old = g_app.layout;
+        bool changed = force || old.size.x != layout.size.x || old.size.y != layout.size.y || old.scale != layout.scale ||
+            !EqualRect(&old.primaryWork, &layout.primaryWork) || !SameRects(old.monitors, layout.monitors) ||
+            !SameRects(old.icons, layout.icons);
+        if (!changed) return;
+        g_app.layout = layout;
+        Log(L"Layout: host %.0fx%.0f, primary work (%ld,%ld)-(%ld,%ld) host px, scale %.2f, %zu icon cells",
+            layout.size.x, layout.size.y, layout.primaryWork.left, layout.primaryWork.top, layout.primaryWork.right,
+            layout.primaryWork.bottom, layout.scale, layout.icons.size());
+        g_app.graphics.SetScale(layout.scale);
+        g_app.ambient.SetLayout(layout);
+        g_app.dashboard.SetLayout(layout);
+    }
+
+    std::wstring ResolveScene()
+    {
+        if (!g_app.sceneOverride.empty()) return g_app.sceneOverride;
+        auto const& d = g_app.desktop;
+        std::wstring id = ToLower(d.id), name = ToLower(d.name), index = std::to_wstring(d.index);
+        for (auto const& [key, scene] : g_app.config.desktopScenes)
+        {
+            if ((!id.empty() && key == id) || (!name.empty() && key == name) || (d.index > 0 && key == index)) return scene;
+        }
+        return g_app.config.defaultScene;
+    }
+
+    void UpdateDashboard();
+
+    void ApplyScene(bool force = false)
+    {
+        ScenePreset preset = PresetFor(ResolveScene());
+        if (!force && preset.name == g_app.sceneName) return;
+        g_app.sceneName = preset.name;
+        Log(L"Scene '%s' (virtual desktop %d '%s' %s%s)", preset.name.c_str(), g_app.desktop.index,
+            g_app.desktop.name.c_str(), g_app.desktop.id.c_str(), g_app.sceneOverride.empty() ? L"" : L", overridden");
+        g_app.ambient.SetPreset(preset);
+        g_app.dashboard.SetPreset(preset);
+        UpdateDashboard();
+        UpdateTrayTip();
+    }
+
+    void UpdateDashboard()
+    {
+        bool want = g_app.dashboardMode == DashboardMode::On ||
+            (g_app.dashboardMode == DashboardMode::Auto && g_app.revealed && !g_app.fullscreenPaused);
+        bool before = g_app.dashboard.Visible();
+        // Icons may have moved since the last reveal: refresh the free region before the cards animate in.
+        if (want && !before) ApplyLayout(false);
+        g_app.dashboard.Show(want);
+        bool shown = g_app.dashboard.Visible();
+        if (shown != before)
+        {
+            Log(L"Dashboard %s", shown ? L"shown" : L"hidden");
+            g_app.ambient.SetDashboardVisible(shown);
+            if (!shown) g_app.dashboard.Hover(std::nullopt);
+            if (shown)
+            {
+                // Refresh cheap, glanceable data the moment the user looks at it.
+                if (g_app.providers.ports) g_app.providers.ports->Wake();
+                if (g_app.providers.sessions) g_app.providers.sessions->Wake();
+            }
+        }
+        UpdatePaused();
+    }
+
+    void EvaluateReveal()
+    {
+        MONITORINFO mi;
+        PrimaryMonitor(mi);
+        auto state = g_app.reveal.Evaluate(mi.rcWork, WorkAreas());
+        if (state.revealed != g_app.revealed || state.occluded != g_app.occluded ||
+            (!state.revealed && state.reason != g_app.revealReason))
+        {
+            Log(L"Desktop %s%s: %s", state.revealed ? L"revealed" : L"not revealed",
+                state.occluded ? L" (fully occluded)" : L"", state.reason.c_str());
+        }
+        g_app.revealed = state.revealed;
+        g_app.occluded = state.occluded;
+        g_app.revealReason = state.reason;
+        UpdateDashboard();
+    }
+
+    void SetMock(bool mock)
+    {
+        if (g_app.mock == mock) return;
+        g_app.mock = mock;
+        Log(L"Mock data %s", mock ? L"on" : L"off");
+        g_app.providers.ForEach([&](Provider& p) { p.SetMock(mock); });
+        UpdateTrayTip();
+    }
+
+    void SetSceneOverride(std::wstring name)
+    {
+        g_app.sceneOverride = std::move(name);
+        ApplyScene();
+    }
+
+    void NextScene()
+    {
+        auto names = SceneNames();
+        auto it = std::find(names.begin(), names.end(), g_app.sceneName);
+        size_t next = it == names.end() ? 0 : (static_cast<size_t>(it - names.begin()) + 1) % names.size();
+        SetSceneOverride(names[next]);
+    }
+
+    void SetDashboardMode(DashboardMode mode)
+    {
+        g_app.dashboardMode = mode;
+        Log(L"Dashboard mode: %s", mode == DashboardMode::On ? L"forced on" : mode == DashboardMode::Off ? L"forced off" : L"auto (Win+D)");
+        UpdateDashboard();
+        UpdateTrayTip();
     }
 
     void Detach()
@@ -298,6 +566,7 @@ namespace
         }
         g_app.displaySignature = DesktopHost::DisplaySignature();
         g_app.icons.Reset();
+        ApplyLayout(true);
         Log(L"Attached. Effect '%s' rendering into HWND 0x%p (parent 0x%p)",
             g_app.scene.CurrentEffectName(), g_app.host.Hwnd(), g_app.host.Windows().parent);
         return true;
@@ -321,6 +590,7 @@ namespace
         g_app.displaySignature = signature;
         g_app.host.UpdateBounds();
         g_app.scene.Resize(HostSize(), g_app.host.MonitorRectsInHost());
+        ApplyLayout(true);
     }
 
     void BeginExit(const wchar_t* reason)
@@ -332,11 +602,49 @@ namespace
         KillTimer(g_app.controller, TIMER_REATTACH);
         KillTimer(g_app.controller, TIMER_RELAYOUT);
         KillTimer(g_app.controller, TIMER_AUTOEXIT);
+        KillTimer(g_app.controller, TIMER_REVEAL);
+        KillTimer(g_app.controller, TIMER_TICK);
+        g_app.reveal.Stop();
         StopHookThread();
+        g_app.desktops.Stop();
+        g_app.providers.ForEach([](Provider& p) { p.Stop(); });
         Detach();
         RemoveTrayIcon();
         RestoreWallpaper();
         DestroyWindow(g_app.controller);
+    }
+
+    // Commands from `LiveDesktop.exe --send <cmd>` (WM_COPYDATA). Used for scripted demos/screenshots.
+    void HandleCommand(std::wstring const& raw)
+    {
+        std::wstring cmd = ToLower(Trim(raw));
+        Log(L"Command: %s", cmd.c_str());
+        auto arg = [&](std::wstring const& prefix, std::wstring& value) {
+            if (cmd.rfind(prefix, 0) != 0) return false;
+            value = cmd.substr(prefix.size());
+            return true;
+        };
+        std::wstring value;
+        if (cmd == L"next-effect" || cmd == L"next") { g_app.scene.NextEffect(); UpdateTrayTip(); }
+        else if (cmd == L"next-scene") NextScene();
+        else if (arg(L"scene:", value)) SetSceneOverride(value == L"auto" ? L"" : value);
+        else if (arg(L"effect:", value)) { g_app.scene.SetEffect(static_cast<size_t>(_wtoi(value.c_str())) % g_app.scene.EffectCount()); UpdateTrayTip(); }
+        else if (arg(L"dashboard:", value))
+            SetDashboardMode(value == L"on" ? DashboardMode::On : value == L"off" ? DashboardMode::Off : DashboardMode::Auto);
+        else if (arg(L"mock:", value)) SetMock(value == L"on");
+        else if (arg(L"ci:", value))
+        {
+            Mocks().ci = value == L"red" ? 1 : value == L"green" ? -1 : 0;
+            if (g_app.providers.github) g_app.providers.github->Wake();
+        }
+        else if (arg(L"log:", value))
+        {
+            Mocks().logError = value == L"error";
+            if (g_app.providers.logTail) g_app.providers.logTail->Wake();
+        }
+        else if (cmd == L"pause") { g_app.userPaused = !g_app.userPaused; UpdatePaused(); UpdateTrayTip(); }
+        else if (cmd == L"stop" || cmd == L"exit") BeginExit(L"--send stop");
+        else Log(L"Unknown command '%s'", cmd.c_str());
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -360,18 +668,51 @@ namespace
             if (!g_app.host.IsAttached()) return 0;
             POINT pt{ g_pointerX.load(), g_pointerY.load() };
             bool over = !g_app.fullscreenPaused && IsDesktopAt(pt);
-            POINT local = g_app.host.ScreenToHost(pt);
-            g_app.scene.PointerMoved(float2(static_cast<float>(local.x), static_cast<float>(local.y)), over);
+            float2 local = ToLocal(pt);
+            g_app.scene.PointerMoved(local, over);
+            if (g_app.dashboard.Visible())
+                g_app.dashboard.Hover(over ? std::optional<float2>(local) : std::nullopt);
             return 0;
         }
         case WM_APP_CLICK:
         {
+            g_app.click.active = false;
             if (!g_app.host.IsAttached() || g_app.fullscreenPaused) return 0;
             POINT pt{ static_cast<LONG>(wParam), static_cast<LONG>(lParam) };
             if (!IsDesktopAt(pt) || g_app.icons.HitTestIcon(pt)) return 0;
-            POINT local = g_app.host.ScreenToHost(pt);
-            g_app.scene.Click(float2(static_cast<float>(local.x), static_cast<float>(local.y)));
+            float2 local = ToLocal(pt);
+            if (g_app.dashboard.Visible() && g_app.dashboard.InsideCard(local))
+            {
+                // Cards act on button-up (a click, not a drag/rubber-band selection).
+                if (auto hit = g_app.dashboard.HitTest(local))
+                    g_app.click = PendingClick{ true, pt, GetTickCount64(), *hit };
+                return 0;
+            }
+            g_app.scene.Click(local);
             return 0;
+        }
+        case WM_APP_RELEASE:
+        {
+            if (!g_app.click.active) return 0;
+            g_app.click.active = false;
+            POINT pt{ static_cast<LONG>(wParam), static_cast<LONG>(lParam) };
+            if (std::abs(pt.x - g_app.click.screen.x) > 6 || std::abs(pt.y - g_app.click.screen.y) > 6 ||
+                GetTickCount64() - g_app.click.tick > 600 || !g_app.dashboard.Visible()) return 0;
+            if (!IsDesktopAt(pt) || g_app.icons.HitTestIcon(pt)) return 0;
+            auto hit = g_app.dashboard.HitTest(ToLocal(pt));
+            if (hit && *hit == g_app.click.hit) g_app.dashboard.Activate(*hit);
+            return 0;
+        }
+        case WM_APP_REVEAL:
+            g_app.reveal.Acknowledge();
+            SetTimer(hwnd, TIMER_REVEAL, 120, nullptr);
+            return 0;
+        case WM_COPYDATA:
+        {
+            auto const* cds = reinterpret_cast<COPYDATASTRUCT const*>(lParam);
+            if (!cds || cds->dwData != kCopyDataCommand || !cds->lpData || cds->cbData > 4096) return FALSE;
+            HandleCommand(std::wstring(static_cast<wchar_t const*>(cds->lpData), cds->cbData / sizeof(wchar_t)));
+            return TRUE;
         }
         case WM_APP_HOST_LOST:
             ScheduleReattach(L"host window destroyed externally");
@@ -407,6 +748,15 @@ namespace
             case IDM_EXIT:
                 BeginExit(L"tray menu");
                 break;
+            case IDM_MOCK:
+                SetMock(!g_app.mock);
+                break;
+            case IDM_DASHBOARD:
+                SetDashboardMode(g_app.dashboardMode == DashboardMode::On ? DashboardMode::Auto : DashboardMode::On);
+                break;
+            case IDM_NEXT_SCENE:
+                NextScene();
+                break;
             }
             return 0;
 
@@ -436,8 +786,20 @@ namespace
                         fullscreen ? L"paused" : L"resumed", reason.empty() ? L"" : L": ", reason.c_str());
                     UpdatePaused();
                 }
+                EvaluateReveal(); // safety net for missed WinEvents
                 return 0;
             }
+            case TIMER_REVEAL:
+                KillTimer(hwnd, TIMER_REVEAL);
+                EvaluateReveal();
+                return 0;
+            case TIMER_TICK:
+                if (!g_app.scene.Paused())
+                {
+                    g_app.ambient.Tick();
+                    g_app.dashboard.Tick();
+                }
+                return 0;
             case TIMER_REATTACH:
                 ++g_app.reattachAttempts;
                 if (TryAttach())
@@ -501,12 +863,39 @@ namespace
         wprintf(L"LiveDesktop - interactive composition wallpaper behind the desktop icons\n\n"
                 L"Usage: LiveDesktop.exe [options]\n"
                 L"  --effect <n>            start with effect n (0=Aurora, 1=Fireflies, 2=Ember)\n"
+                L"  --mock                  use realistic fake data for every provider (no credentials needed)\n"
+                L"  --scene <name>          force a scene: default | work | focus (else per virtual desktop)\n"
+                L"  --dashboard             start with the dashboard forced visible (no Win+D needed)\n"
                 L"  --exit-after <seconds>  exit automatically (for testing)\n"
                 L"  --no-wallpaper-refresh  do not re-apply the wallpaper on exit\n"
                 L"  --layered               experimental: make the host a layered child window\n"
                 L"  --next                  tell the running instance to switch effect\n"
                 L"  --stop                  tell the running instance to exit cleanly\n"
-                L"Ctrl+C, the tray menu 'Exit', or WM_CLOSE exit cleanly.\n");
+                L"  --send <command>        send a command to the running instance:\n"
+                L"                            next-effect | effect:<n> | next-scene | scene:<name|auto>\n"
+                L"                            dashboard:on|off|auto | mock:on|off | ci:red|green|mixed\n"
+                L"                            log:error|ok | pause | stop\n"
+                L"Ctrl+C, the tray menu 'Exit', or WM_CLOSE exit cleanly.\n"
+                L"Config: %%LOCALAPPDATA%%\\LiveDesktop\\config.json (created with defaults on first run).\n");
+    }
+
+    int SendCommand(std::wstring const& command)
+    {
+        HWND controller = FindWindowW(kControllerClass, nullptr);
+        if (!controller)
+        {
+            wprintf(L"LiveDesktop is not running.\n");
+            return 1;
+        }
+        COPYDATASTRUCT cds{ kCopyDataCommand, static_cast<DWORD>(command.size() * sizeof(wchar_t)), const_cast<wchar_t*>(command.data()) };
+        DWORD_PTR result = 0;
+        if (!SendMessageTimeoutW(controller, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&cds), SMTO_ABORTIFHUNG, 5000, &result) || !result)
+        {
+            wprintf(L"Command '%s' was not accepted.\n", command.c_str());
+            return 1;
+        }
+        wprintf(L"Sent '%s' to running instance.\n", command.c_str());
+        return 0;
     }
 
     bool ParseOptions(int argc, wchar_t** argv, Options& opts, int& commandExit)
@@ -519,6 +908,14 @@ namespace
             else if (arg == L"--exit-after") opts.exitAfterSeconds = static_cast<UINT>(_wtoi(next()));
             else if (arg == L"--no-wallpaper-refresh") opts.refreshWallpaper = false;
             else if (arg == L"--layered") opts.layered = true;
+            else if (arg == L"--mock") opts.mock = true;
+            else if (arg == L"--scene") opts.scene = ToLower(next());
+            else if (arg == L"--dashboard") opts.dashboard = true;
+            else if (arg == L"--send")
+            {
+                commandExit = SendCommand(next());
+                return false;
+            }
             else if (arg == L"--stop" || arg == L"--next")
             {
                 HWND controller = FindWindowW(kControllerClass, nullptr);
@@ -549,6 +946,12 @@ int wmain(int argc, wchar_t** argv)
 {
     int commandExit = 0;
     if (!ParseOptions(argc, argv, g_app.options, commandExit)) return commandExit;
+
+    // Launched from Explorer (we own the console alone): drop the console window; the log file remains.
+    {
+        DWORD processes[2]{};
+        if (GetConsoleProcessList(processes, 2) == 1) FreeConsole();
+    }
 
     HANDLE mutex = CreateMutexW(nullptr, TRUE, kMutexName);
     if (GetLastError() == ERROR_ALREADY_EXISTS)
@@ -601,6 +1004,33 @@ int wmain(int argc, wchar_t** argv)
     }
     g_app.scene.SetEffect(g_app.options.effect % g_app.scene.EffectCount());
 
+    g_app.config = LoadConfig();
+    g_app.mock = g_app.options.mock || g_app.config.mock;
+    Log(L"Config: %s (%zu repos, mock=%d)", g_app.config.path.c_str(), g_app.config.repos.size(), g_app.mock);
+    try
+    {
+        g_app.graphics.Initialize(g_app.scene.Compositor());
+    }
+    catch (winrt::hresult_error const& e)
+    {
+        Log(L"Direct2D/DirectWrite initialization failed: 0x%08X %s", e.code().value, e.message().c_str());
+        return 1;
+    }
+    g_app.graphics.OnDeviceReplaced = [] {
+        Log(L"Graphics device replaced -> redrawing surfaces");
+        g_app.ambient.RedrawAll();
+        g_app.dashboard.RedrawAll();
+    };
+    // The log tail is opt-in (config logTail.enabled + logPath); mock mode always demos it.
+    Config providerConfig = g_app.config;
+    if (g_app.mock) providerConfig.logTail.enabled = true;
+    g_app.ambient.Initialize(g_app.scene, g_app.graphics, g_app.config.focusMinutes);
+    g_app.dashboard.Initialize(g_app.scene, g_app.graphics, providerConfig.logTail.enabled);
+    g_app.sceneOverride = g_app.options.scene;
+    g_app.desktop = VirtualDesktopWatcher::ReadCurrent();
+    g_app.dashboardMode = g_app.options.dashboard ? DashboardMode::On : DashboardMode::Auto;
+    ApplyScene(true);
+
     g_app.icon = CreateAppIcon(GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()));
     AddTrayIcon();
 
@@ -613,7 +1043,43 @@ int wmain(int argc, wchar_t** argv)
 
     g_hookTarget = g_app.controller;
     StartHookThread();
+
+    // Data providers: background threads -> immutable snapshots -> UI thread via the DispatcherQueue.
+    {
+        auto& p = g_app.providers;
+        p.sessions = std::make_unique<SessionsProvider>(providerConfig);
+        p.github = std::make_unique<GitHubProvider>(providerConfig);
+        p.system = std::make_unique<SystemProvider>(providerConfig);
+        p.calendar = std::make_unique<CalendarProvider>(providerConfig);
+        p.ports = std::make_unique<PortsProvider>(providerConfig);
+        p.logTail = std::make_unique<LogTailProvider>(providerConfig);
+        p.sessions->OnSnapshot = [](SessionsSnapshot const& s) { g_app.ambient.Update(s); g_app.dashboard.Update(s); };
+        p.github->OnSnapshot = [](PullRequestsSnapshot const& s) { g_app.ambient.Update(s); g_app.dashboard.Update(s); };
+        p.system->OnSnapshot = [](SystemSnapshot const& s) { g_app.ambient.Update(s); };
+        p.calendar->OnSnapshot = [](CalendarSnapshot const& s) { g_app.ambient.Update(s); g_app.dashboard.Update(s); };
+        p.ports->OnSnapshot = [](PortsSnapshot const& s) { g_app.dashboard.Update(s); };
+        p.logTail->OnSnapshot = [](LogTailSnapshot const& s) { g_app.dashboard.Update(s); };
+        auto queue = g_app.scene.Queue();
+        p.ForEach([&](Provider& provider) {
+            provider.Start(queue, g_app.mock);
+            Log(L"Provider '%s': %s", provider.Name().c_str(), provider.Enabled() ? (g_app.mock ? L"mock" : L"real") : L"disabled");
+        });
+    }
+
+    g_app.desktops.OnChanged = [](VirtualDesktopInfo const& info) {
+        if (info.id == g_app.desktop.id) return;
+        g_app.desktop = info;
+        g_app.sceneOverride.clear();
+        Log(L"Virtual desktop switched to %d '%s' %s", info.index, info.name.c_str(), info.id.c_str());
+        ApplyScene();
+    };
+    g_app.desktops.Start(g_app.scene.Queue());
+
+    g_app.reveal.Start(g_app.controller, WM_APP_REVEAL);
+    EvaluateReveal();
+
     SetTimer(g_app.controller, TIMER_HEALTH, 2000, nullptr);
+    SetTimer(g_app.controller, TIMER_TICK, 5000, nullptr);
     if (g_app.options.exitAfterSeconds)
     {
         SetTimer(g_app.controller, TIMER_AUTOEXIT, g_app.options.exitAfterSeconds * 1000, nullptr);
@@ -627,6 +1093,11 @@ int wmain(int argc, wchar_t** argv)
         DispatchMessageW(&msg);
     }
 
+    g_app.providers.ForEach([](Provider& p) { p.Stop(); });
+    g_app.providers = Providers{};
+    g_app.dashboard.Shutdown();
+    g_app.ambient.Shutdown();
+    g_app.graphics.Shutdown();
     g_app.scene.Shutdown();
     if (g_app.icon) DestroyIcon(g_app.icon);
     Log(L"Clean shutdown complete");
