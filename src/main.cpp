@@ -245,7 +245,8 @@ namespace
     // dashboard showing) also throttles the providers.
     void UpdatePaused()
     {
-        bool heavy = g_app.fullscreenPaused || (g_app.occluded && !g_app.dashboard.Visible());
+        // Fully occluded means nothing of the desktop is visible, so even a forced dashboard can stop rendering.
+        bool heavy = g_app.fullscreenPaused || g_app.occluded;
         bool paused = g_app.userPaused || heavy;
         if (paused != g_app.scene.Paused())
         {
@@ -644,6 +645,18 @@ namespace
         }
         else if (cmd == L"pause") { g_app.userPaused = !g_app.userPaused; UpdatePaused(); UpdateTrayTip(); }
         else if (cmd == L"stop" || cmd == L"exit") BeginExit(L"--send stop");
+        else if (cmd.rfind(L"hit:", 0) == 0)
+        {
+            // Diagnostic: report what a click at screen x,y would do, without clicking.
+            POINT pt{};
+            if (swscanf_s(cmd.c_str() + 4, L"%ld,%ld", &pt.x, &pt.y) != 2) return;
+            ReplyMessage(TRUE); // release the sender so the icon COM call isn't an input-synchronous callout
+            float2 local = ToLocal(pt);
+            auto hit = g_app.dashboard.HitTest(local);
+            Log(L"hit %ld,%ld -> local %.0f,%.0f desktop=%d icon=%d card=%d item=%s", pt.x, pt.y, local.x, local.y,
+                IsDesktopAt(pt) ? 1 : 0, g_app.icons.HitTestIcon(pt) ? 1 : 0, g_app.dashboard.InsideCard(local) ? 1 : 0,
+                hit ? hit->url.c_str() : L"-");
+        }
         else Log(L"Unknown command '%s'", cmd.c_str());
     }
 
@@ -874,7 +887,7 @@ namespace
                 L"  --send <command>        send a command to the running instance:\n"
                 L"                            next-effect | effect:<n> | next-scene | scene:<name|auto>\n"
                 L"                            dashboard:on|off|auto | mock:on|off | ci:red|green|mixed\n"
-                L"                            log:error|ok | pause | stop\n"
+                L"                            log:error|ok | pause | stop | hit:<x>,<y>\n"
                 L"Ctrl+C, the tray menu 'Exit', or WM_CLOSE exit cleanly.\n"
                 L"Config: %%LOCALAPPDATA%%\\LiveDesktop\\config.json (created with defaults on first run).\n");
     }
