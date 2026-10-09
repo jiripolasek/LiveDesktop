@@ -10,6 +10,9 @@
 #include "Ambient.h"
 #include "Dashboard.h"
 #include "Reveal.h"
+#include "Clipboard.h"
+#include "ClipboardStack.h"
+#include "DropWindow.h"
 #include "Util.h"
 
 namespace ld { HICON CreateAppIcon(int size); }
@@ -34,6 +37,7 @@ namespace
     constexpr UINT_PTR TIMER_AUTOEXIT = 4;
     constexpr UINT_PTR TIMER_REVEAL = 5;
     constexpr UINT_PTR TIMER_TICK = 6;
+    constexpr UINT_PTR TIMER_DROPHIDE = 7;
 
     constexpr UINT IDM_NEXT_EFFECT = 100;
     constexpr UINT IDM_PAUSE = 101;
@@ -41,6 +45,7 @@ namespace
     constexpr UINT IDM_MOCK = 103;
     constexpr UINT IDM_DASHBOARD = 104;
     constexpr UINT IDM_NEXT_SCENE = 105;
+    constexpr UINT IDM_CLIPBOARD = 106;
     constexpr UINT kTrayId = 1;
     constexpr ULONG_PTR kCopyDataCommand = 0x4C44; // 'LD'
 
@@ -65,21 +70,23 @@ namespace
         std::unique_ptr<CalendarProvider> calendar;
         std::unique_ptr<PortsProvider> ports;
         std::unique_ptr<LogTailProvider> logTail;
+        std::unique_ptr<WorktreesProvider> worktrees;
 
         template <class F> void ForEach(F&& f)
         {
-            Provider* all[] = { sessions.get(), github.get(), system.get(), calendar.get(), ports.get(), logTail.get() };
+            Provider* all[] = { sessions.get(), github.get(), system.get(), calendar.get(), ports.get(), logTail.get(), worktrees.get() };
             for (auto* p : all) if (p) f(*p);
         }
     };
 
-    // Left-button press being tracked for a click on a dashboard card.
+    // Left-button press being tracked for a click on a dashboard card or a clipboard card.
     struct PendingClick
     {
         bool active = false;
         POINT screen{};
         ULONGLONG tick = 0;
         Dashboard::Hit hit;
+        std::optional<uint64_t> clip;
     };
 
     struct App
@@ -118,6 +125,11 @@ namespace
         bool occluded = false;
         std::wstring revealReason;
         PendingClick click;
+        ClipboardWatcher clipboard;
+        ClipboardStack stack;
+        DropWindow drop;
+        bool buttonDown = false;           // left button held anywhere (drag-to-shelf detection)
+        POINT downAt{};
     };
 
     App g_app;
@@ -344,6 +356,7 @@ namespace
         AppendMenuW(menu, MF_STRING, IDM_NEXT_SCENE, scene);
         AppendMenuW(menu, MF_STRING | (g_app.dashboardMode == DashboardMode::On ? MF_CHECKED : 0), IDM_DASHBOARD, L"Force dashboard");
         AppendMenuW(menu, MF_STRING | (g_app.mock ? MF_CHECKED : 0), IDM_MOCK, L"Mock data");
+        AppendMenuW(menu, MF_STRING | (g_app.stack.Enabled() ? MF_CHECKED : 0), IDM_CLIPBOARD, L"Clipboard shelf");
         AppendMenuW(menu, MF_STRING | (g_app.userPaused ? MF_CHECKED : 0), IDM_PAUSE, L"Pause animations");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, IDM_EXIT, L"Exit");
@@ -440,6 +453,8 @@ namespace
             layout.primaryWork.bottom, layout.scale, layout.icons.size());
         g_app.graphics.SetScale(layout.scale);
         g_app.ambient.SetLayout(layout);
+        g_app.stack.SetLayout(layout);
+        g_app.dashboard.SetReserved(g_app.stack.Enabled() ? g_app.stack.Footprint() : RECT{});
         g_app.dashboard.SetLayout(layout);
     }
 
@@ -466,6 +481,7 @@ namespace
             g_app.desktop.name.c_str(), g_app.desktop.id.c_str(), g_app.sceneOverride.empty() ? L"" : L", overridden");
         g_app.ambient.SetPreset(preset);
         g_app.dashboard.SetPreset(preset);
+        g_app.stack.SetPreset(preset);
         UpdateDashboard();
         UpdateTrayTip();
     }
@@ -489,6 +505,7 @@ namespace
                 // Refresh cheap, glanceable data the moment the user looks at it.
                 if (g_app.providers.ports) g_app.providers.ports->Wake();
                 if (g_app.providers.sessions) g_app.providers.sessions->Wake();
+                if (g_app.providers.worktrees) g_app.providers.worktrees->Wake();
             }
         }
         UpdatePaused();
@@ -517,7 +534,29 @@ namespace
         g_app.mock = mock;
         Log(L"Mock data %s", mock ? L"on" : L"off");
         g_app.providers.ForEach([&](Provider& p) { p.SetMock(mock); });
+        g_app.clipboard.SetMock(mock);
         UpdateTrayTip();
+    }
+
+    void StartClipboard()
+    {
+        g_app.clipboard.OnSnapshot = [](ClipboardSnapshot const& s) { g_app.stack.Update(s); };
+        g_app.clipboard.Start(g_app.scene.Queue(), g_app.mock, static_cast<size_t>(g_app.config.clipboardItems));
+    }
+
+    // Hiding the shelf also stops watching the clipboard (and forgets the in-memory history).
+    void SetClipboardShelf(bool enabled)
+    {
+        if (enabled == g_app.stack.Enabled()) return;
+        g_app.drop.Hide();
+        if (enabled) StartClipboard();
+        else
+        {
+            g_app.clipboard.Stop();
+            g_app.stack.Update(ClipboardSnapshot{});
+        }
+        g_app.stack.SetEnabled(enabled);
+        ApplyLayout(true);
     }
 
     void SetSceneOverride(std::wstring name)
@@ -605,8 +644,11 @@ namespace
         KillTimer(g_app.controller, TIMER_AUTOEXIT);
         KillTimer(g_app.controller, TIMER_REVEAL);
         KillTimer(g_app.controller, TIMER_TICK);
+        KillTimer(g_app.controller, TIMER_DROPHIDE);
         g_app.reveal.Stop();
         StopHookThread();
+        g_app.drop.Destroy();
+        g_app.clipboard.Stop();
         g_app.desktops.Stop();
         g_app.providers.ForEach([](Provider& p) { p.Stop(); });
         Detach();
@@ -618,7 +660,15 @@ namespace
     // Commands from `LiveDesktop.exe --send <cmd>` (WM_COPYDATA). Used for scripted demos/screenshots.
     void HandleCommand(std::wstring const& raw)
     {
-        std::wstring cmd = ToLower(Trim(raw));
+        std::wstring trimmed = Trim(raw);
+        if (ToLower(trimmed.substr(0, 5)) == L"clip:")
+        {
+            // Case-preserving: simulates a drop of text onto the shelf.
+            Log(L"Command: clip (%zu chars)", trimmed.size() - 5);
+            g_app.clipboard.AddText(trimmed.substr(5), L"send");
+            return;
+        }
+        std::wstring cmd = ToLower(trimmed);
         Log(L"Command: %s", cmd.c_str());
         auto arg = [&](std::wstring const& prefix, std::wstring& value) {
             if (cmd.rfind(prefix, 0) != 0) return false;
@@ -639,6 +689,15 @@ namespace
         else if (arg(L"dashboard:", value))
             SetDashboardMode(value == L"on" ? DashboardMode::On : value == L"off" ? DashboardMode::Off : DashboardMode::Auto);
         else if (arg(L"mock:", value)) SetMock(value == L"on");
+        else if (arg(L"stack:", value))
+        {
+            if (value == L"open") g_app.stack.ForceFan(true);
+            else if (value == L"close") g_app.stack.ForceFan(false);
+            else if (value == L"auto") g_app.stack.ForceFan(std::nullopt);
+            else if (value == L"drop") g_app.stack.SetDropHover(true);
+            else if (value == L"nodrop") g_app.stack.SetDropHover(false);
+            else if (value == L"on" || value == L"off") SetClipboardShelf(value == L"on");
+        }
         else if (arg(L"ci:", value))
         {
             Mocks().ci = value == L"red" ? 1 : value == L"green" ? -1 : 0;
@@ -689,22 +748,46 @@ namespace
             bool over = !g_app.fullscreenPaused && IsDesktopAt(pt);
             float2 local = ToLocal(pt);
             g_app.scene.PointerMoved(local, over);
+            bool onStack = over && g_app.stack.Contains(local);
+            if (!g_app.buttonDown) g_app.stack.Hover(over ? std::optional<float2>(local) : std::nullopt);
             if (g_app.dashboard.Visible())
-                g_app.dashboard.Hover(over ? std::optional<float2>(local) : std::nullopt);
+                g_app.dashboard.Hover(over && !onStack ? std::optional<float2>(local) : std::nullopt);
+
+            // Something is being dragged towards the shelf: put the (invisible) drop window over it.
+            if (g_app.buttonDown && g_app.stack.Enabled() && !g_app.fullscreenPaused &&
+                (std::abs(pt.x - g_app.downAt.x) > 8 || std::abs(pt.y - g_app.downAt.y) > 8))
+            {
+                RECT zone = g_app.stack.DropZone();
+                POINT origin{};
+                MapWindowPoints(g_app.host.Hwnd(), HWND_DESKTOP, &origin, 1);
+                OffsetRect(&zone, origin.x, origin.y);
+                bool inZone = PtInRect(&zone, pt) != FALSE;
+                if (inZone && !g_app.drop.Visible() && IsDesktopAt(pt)) g_app.drop.Show(zone);
+                else if (!inZone && g_app.drop.Visible() && !g_app.drop.InDrag()) g_app.drop.Hide();
+            }
             return 0;
         }
         case WM_APP_CLICK:
         {
             g_app.click.active = false;
-            if (!g_app.host.IsAttached() || g_app.fullscreenPaused) return 0;
             POINT pt{ static_cast<LONG>(wParam), static_cast<LONG>(lParam) };
+            g_app.buttonDown = true;
+            g_app.downAt = pt;
+            KillTimer(hwnd, TIMER_DROPHIDE);
+            if (!g_app.host.IsAttached() || g_app.fullscreenPaused) return 0;
             if (!IsDesktopAt(pt) || g_app.icons.HitTestIcon(pt)) return 0;
             float2 local = ToLocal(pt);
+            if (g_app.stack.Contains(local))
+            {
+                if (auto id = g_app.stack.HitTest(local))
+                    g_app.click = PendingClick{ true, pt, GetTickCount64(), {}, id };
+                return 0;
+            }
             if (g_app.dashboard.Visible() && g_app.dashboard.InsideCard(local))
             {
                 // Cards act on button-up (a click, not a drag/rubber-band selection).
                 if (auto hit = g_app.dashboard.HitTest(local))
-                    g_app.click = PendingClick{ true, pt, GetTickCount64(), *hit };
+                    g_app.click = PendingClick{ true, pt, GetTickCount64(), *hit, std::nullopt };
                 return 0;
             }
             g_app.scene.Click(local);
@@ -712,13 +795,27 @@ namespace
         }
         case WM_APP_RELEASE:
         {
+            g_app.buttonDown = false;
+            // An OLE drop completes around button-up; give it a moment, then tidy up.
+            if (g_app.drop.Visible()) SetTimer(hwnd, TIMER_DROPHIDE, 500, nullptr);
             if (!g_app.click.active) return 0;
             g_app.click.active = false;
             POINT pt{ static_cast<LONG>(wParam), static_cast<LONG>(lParam) };
             if (std::abs(pt.x - g_app.click.screen.x) > 6 || std::abs(pt.y - g_app.click.screen.y) > 6 ||
-                GetTickCount64() - g_app.click.tick > 600 || !g_app.dashboard.Visible()) return 0;
+                GetTickCount64() - g_app.click.tick > 600) return 0;
             if (!IsDesktopAt(pt) || g_app.icons.HitTestIcon(pt)) return 0;
-            auto hit = g_app.dashboard.HitTest(ToLocal(pt));
+            float2 local = ToLocal(pt);
+            if (g_app.click.clip)
+            {
+                if (g_app.stack.HitTest(local) == g_app.click.clip)
+                {
+                    g_app.stack.Activate(*g_app.click.clip);
+                    g_app.clipboard.Copy(*g_app.click.clip);
+                }
+                return 0;
+            }
+            if (!g_app.dashboard.Visible()) return 0;
+            auto hit = g_app.dashboard.HitTest(local);
             if (hit && *hit == g_app.click.hit) g_app.dashboard.Activate(*hit);
             return 0;
         }
@@ -776,6 +873,9 @@ namespace
             case IDM_NEXT_SCENE:
                 NextScene();
                 break;
+            case IDM_CLIPBOARD:
+                SetClipboardShelf(!g_app.stack.Enabled());
+                break;
             }
             return 0;
 
@@ -818,6 +918,15 @@ namespace
                     g_app.scene.Tick();
                     g_app.ambient.Tick();
                     g_app.dashboard.Tick();
+                    g_app.stack.Tick();
+                }
+                return 0;
+            case TIMER_DROPHIDE:
+                KillTimer(hwnd, TIMER_DROPHIDE);
+                if (!g_app.drop.InDrag())
+                {
+                    g_app.drop.Hide();
+                    g_app.stack.SetDropHover(false);
                 }
                 return 0;
             case TIMER_REATTACH:
@@ -882,7 +991,7 @@ namespace
     {
         wprintf(L"LiveDesktop - interactive composition wallpaper behind the desktop icons\n\n"
                 L"Usage: LiveDesktop.exe [options]\n"
-                L"  --effect <n>            start with effect n (0=Aurora, 1=Fireflies, 2=Ember)\n"
+                L"  --effect <n>            start with effect n (0=Meadow, 1=Aurora, 2=Fireflies, 3=Ember)\n"
                 L"  --mock                  use realistic fake data for every provider (no credentials needed)\n"
                 L"  --scene <name>          force a scene: default | work | focus (else per virtual desktop)\n"
                 L"  --dashboard             start with the dashboard forced visible (no Win+D needed)\n"
@@ -896,6 +1005,7 @@ namespace
                 L"                            dashboard:on|off|auto | mock:on|off | ci:red|green|mixed\n"
                 L"                            log:error|ok | pause | stop | hit:<x>,<y>\n"
                 L"                            time:<dawn|sunrise|morning|day|afternoon|golden|sunset|dusk|night|HH:MM|auto>\n"
+                L"                            stack:open|close|auto|drop|nodrop|on|off | clip:<text>\n"
                 L"Ctrl+C, the tray menu 'Exit', or WM_CLOSE exit cleanly.\n"
                 L"Config: %%LOCALAPPDATA%%\\LiveDesktop\\config.json (created with defaults on first run).\n");
     }
@@ -1042,6 +1152,7 @@ int wmain(int argc, wchar_t** argv)
         Log(L"Graphics device replaced -> redrawing surfaces");
         g_app.ambient.RedrawAll();
         g_app.dashboard.RedrawAll();
+        g_app.stack.RedrawAll();
         g_app.scene.Refresh();
     };
     // The log tail is opt-in (config logTail.enabled + logPath); mock mode always demos it.
@@ -1049,6 +1160,26 @@ int wmain(int argc, wchar_t** argv)
     if (g_app.mock) providerConfig.logTail.enabled = true;
     g_app.ambient.Initialize(g_app.scene, g_app.graphics, g_app.config.focusMinutes);
     g_app.dashboard.Initialize(g_app.scene, g_app.graphics, providerConfig.logTail.enabled);
+    g_app.stack.Initialize(g_app.scene, g_app.graphics);
+    g_app.stack.SetEnabled(g_app.config.clipboard.enabled);
+    g_app.drop.OnDragHover = [](bool active) { g_app.stack.SetDropHover(active); };
+    g_app.drop.OnDrop = [](std::vector<std::wstring> files, std::wstring text) {
+        Log(L"Dropped on the clipboard shelf: %zu file(s), %zu chars", files.size(), text.size());
+        if (!files.empty())
+        {
+            g_app.stack.Dropped(files.size() == 1 ? std::wstring(L"1 file") : std::to_wstring(files.size()) + L" files");
+            g_app.clipboard.AddFiles(std::move(files), L"Dropped");
+        }
+        else
+        {
+            g_app.stack.Dropped(L"text");
+            g_app.clipboard.AddText(std::move(text), L"Dropped");
+        }
+    };
+    // OLE (on top of the STA set up above) for the shelf's drop target.
+    bool ole = SUCCEEDED(OleInitialize(nullptr));
+    if (ole) g_app.drop.Create(g_app.instance);
+    else Log(L"OleInitialize failed - dropping onto the clipboard shelf is disabled");
     g_app.sceneOverride = g_app.options.scene;
     g_app.desktop = VirtualDesktopWatcher::ReadCurrent();
     g_app.dashboardMode = g_app.options.dashboard ? DashboardMode::On : DashboardMode::Auto;
@@ -1076,6 +1207,8 @@ int wmain(int argc, wchar_t** argv)
         p.calendar = std::make_unique<CalendarProvider>(providerConfig);
         p.ports = std::make_unique<PortsProvider>(providerConfig);
         p.logTail = std::make_unique<LogTailProvider>(providerConfig);
+        p.worktrees = std::make_unique<WorktreesProvider>(providerConfig);
+        p.worktrees->OnSnapshot = [](WorktreesSnapshot const& s) { g_app.dashboard.Update(s); };
         p.sessions->OnSnapshot = [](SessionsSnapshot const& s) { g_app.ambient.Update(s); g_app.dashboard.Update(s); };
         p.github->OnSnapshot = [](PullRequestsSnapshot const& s) { g_app.ambient.Update(s); g_app.dashboard.Update(s); };
         p.system->OnSnapshot = [](SystemSnapshot const& s) { g_app.ambient.Update(s); };
@@ -1088,6 +1221,7 @@ int wmain(int argc, wchar_t** argv)
             Log(L"Provider '%s': %s", provider.Name().c_str(), provider.Enabled() ? (g_app.mock ? L"mock" : L"real") : L"disabled");
         });
     }
+    if (g_app.config.clipboard.enabled) StartClipboard();
 
     g_app.desktops.OnChanged = [](VirtualDesktopInfo const& info) {
         if (info.id == g_app.desktop.id) return;
@@ -1118,10 +1252,14 @@ int wmain(int argc, wchar_t** argv)
 
     g_app.providers.ForEach([](Provider& p) { p.Stop(); });
     g_app.providers = Providers{};
+    g_app.clipboard.Stop();
+    g_app.drop.Destroy();
+    g_app.stack.Shutdown();
     g_app.dashboard.Shutdown();
     g_app.ambient.Shutdown();
     g_app.graphics.Shutdown();
     g_app.scene.Shutdown();
+    if (ole) OleUninitialize();
     if (g_app.icon) DestroyIcon(g_app.icon);
     Log(L"Clean shutdown complete");
     SetEvent(g_cleanupDone);

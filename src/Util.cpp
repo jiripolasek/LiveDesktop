@@ -270,4 +270,11 @@ namespace ld
         if (url.rfind(L"https://", 0) != 0 && url.rfind(L"http://localhost:", 0) != 0 && url.rfind(L"ghapp://", 0) != 0) return;
         ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
+
+    void OpenFolder(std::wstring const& path)
+    {
+        DWORD attributes = GetFileAttributesW(path.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)) return;
+        ShellExecuteW(nullptr, L"explore", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
 }

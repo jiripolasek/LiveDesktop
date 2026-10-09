@@ -192,6 +192,7 @@ namespace ld
     void Dashboard::Update(PullRequestsSnapshot const& snapshot) { m_prs = snapshot; m_havePrs = true; m_prsAt = Clock::now(); Changed(Kind::PullRequests); }
     void Dashboard::Update(CalendarSnapshot const& snapshot) { m_calendar = snapshot; m_haveCalendar = true; Changed(Kind::Today); }
     void Dashboard::Update(PortsSnapshot const& snapshot) { m_ports = snapshot; m_havePorts = true; Changed(Kind::Ports); }
+    void Dashboard::Update(WorktreesSnapshot const& snapshot) { m_trees = snapshot; m_haveTrees = true; Changed(Kind::Worktrees); }
 
     void Dashboard::Update(LogTailSnapshot const& snapshot)
     {
@@ -241,6 +242,7 @@ namespace ld
     std::vector<Dashboard::Kind> Dashboard::ActiveKinds() const
     {
         std::vector<Kind> kinds{ Kind::Agents, Kind::PullRequests, Kind::Today, Kind::Ports };
+        if (m_haveTrees && (m_preset.devCards || !m_trees.trees.empty())) kinds.push_back(Kind::Worktrees);
         if (m_preset.devCards && m_logTail) kinds.push_back(Kind::Log);
         return kinds;
     }
@@ -424,6 +426,64 @@ namespace ld
             }
             c.footer = L"Click to open http://localhost";
             if (m_ports.mock) c.footer += L" \u00B7 mock";
+            break;
+        }
+        case Kind::Worktrees:
+        {
+            c.icon = L"\uE8B7";
+            c.title = L"Working trees";
+            c.accent = palette::Pending;
+            int dirty = 0, unpushed = 0, conflicted = 0;
+            for (auto const& t : m_trees.trees)
+            {
+                dirty += t.Dirty() > 0;
+                unpushed += t.ahead > 0 || (t.upstream.empty() && t.branch != L"(detached)");
+                conflicted += t.conflicts > 0;
+            }
+            if (conflicted) { c.meta = std::to_wstring(conflicted) + L" with conflicts"; c.metaColor = palette::Failure; }
+            else if (dirty) { c.meta = std::to_wstring(dirty) + L" with changes"; c.metaColor = palette::Pending; }
+            else if (unpushed) { c.meta = std::to_wstring(unpushed) + L" unpushed"; c.metaColor = palette::Accent; }
+            else if (!m_trees.trees.empty()) { c.meta = L"all clean"; c.metaColor = palette::Success; }
+            for (auto const& t : m_trees.trees)
+            {
+                Row r;
+                r.glyph = L"\uE8B7";
+                if (t.conflicts) r.glyphColor = palette::Failure;
+                else if (t.Dirty()) r.glyphColor = palette::Pending;
+                else if (t.ahead || t.upstream.empty()) r.glyphColor = palette::Accent;
+                else r.glyphColor = palette::Success;
+                r.primary = t.name + L"  \u00B7  " + t.branch;
+
+                std::vector<std::wstring> parts;
+                if (t.conflicts) parts.push_back(std::to_wstring(t.conflicts) + L" conflicted");
+                if (t.staged) parts.push_back(std::to_wstring(t.staged) + L" staged");
+                if (t.modified) parts.push_back(std::to_wstring(t.modified) + L" modified");
+                if (t.untracked) parts.push_back(std::to_wstring(t.untracked) + L" new");
+                if (parts.empty()) parts.push_back(L"clean");
+                for (size_t i = 0; i < parts.size(); ++i) r.secondary += (i ? L", " : L"") + parts[i];
+                if (t.lastActivity != TimePoint{}) r.secondary += L" \u00B7 " + Age(t.lastActivity);
+                if (t.fromSession) r.secondary += L" \u00B7 agent";
+
+                if (t.ahead || t.behind)
+                {
+                    if (t.ahead) r.trailing = L"\u2191" + std::to_wstring(t.ahead);
+                    if (t.behind) r.trailing += (r.trailing.empty() ? L"" : L" ") + std::wstring(L"\u2193") + std::to_wstring(t.behind);
+                    r.trailingColor = t.behind ? palette::Pending : palette::Accent;
+                    r.trailingAlpha = 1.0f;
+                }
+                else if (t.upstream.empty() && t.branch != L"(detached)") r.trailing = L"not pushed";
+                else r.trailing = L"synced";
+                r.url = L"folder:" + t.path;
+                r.accent = t.conflicts > 0;
+                c.rows.push_back(std::move(r));
+            }
+            if (c.rows.empty())
+            {
+                c.rows.push_back(Row{ RowStyle::Empty });
+                c.rows.back().primary = L"No recent repos \u2014 add paths under providers.worktrees";
+            }
+            c.footer = L"Click to open the folder \u00B7 git status";
+            if (m_trees.mock) c.footer += L" \u00B7 mock";
             break;
         }
         case Kind::Log:
@@ -683,6 +743,9 @@ namespace ld
             if (cx < mid) r.left = std::max(r.left, icon.right);
             else r.right = std::min(r.right, icon.left);
         }
+        // Keep clear of the clipboard shelf's resting footprint.
+        if (m_reserved.right > m_reserved.left && Intersects(m_reserved, r))
+            r.bottom = std::min(r.bottom, m_reserved.top - pad);
         if (RectW(r) < D(340))
         {
             r = work;
@@ -864,7 +927,8 @@ namespace ld
             flash.Close();
         });
         Log(L"Dashboard: open %s", hit.url.c_str());
-        OpenUrl(hit.url);
+        if (hit.url.rfind(L"folder:", 0) == 0) OpenFolder(hit.url.substr(7));
+        else OpenUrl(hit.url);
     }
 
     void Dashboard::FlashCard(Card& card, uint32_t rgb)

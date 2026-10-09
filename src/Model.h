@@ -111,4 +111,23 @@ namespace ld
         std::wstring name; // user name, or "Desktop N"
         int index = 0;     // 1-based
     };
+
+    struct WorkingTree
+    {
+        std::wstring path;     // git root
+        std::wstring name;     // folder name
+        std::wstring branch;   // "(detached)" when HEAD is detached
+        std::wstring upstream; // empty when the branch has no upstream
+        int ahead = 0, behind = 0;
+        int staged = 0, modified = 0, untracked = 0, conflicts = 0;
+        TimePoint lastActivity{};
+        bool fromSession = false; // discovered from a recent Copilot session
+        int Dirty() const { return staged + modified + untracked + conflicts; }
+    };
+
+    struct WorktreesSnapshot
+    {
+        std::vector<WorkingTree> trees; // most recently active first
+        bool mock = false;
+    };
 }

@@ -24,6 +24,7 @@ namespace ld
         void Initialize(Scene& scene, Graphics& graphics, bool logTailEnabled);
         void Shutdown();
         void SetLayout(SceneLayout const& layout);
+        void SetReserved(RECT const& r) { m_reserved = r; } // call before SetLayout
         void SetPreset(ScenePreset const& preset);
         void Show(bool visible);
         bool Visible() const { return m_visible; }
@@ -33,6 +34,7 @@ namespace ld
         void Update(CalendarSnapshot const& snapshot);
         void Update(PortsSnapshot const& snapshot);
         void Update(LogTailSnapshot const& snapshot);
+        void Update(WorktreesSnapshot const& snapshot);
         void Tick();
         void RedrawAll();
 
@@ -42,7 +44,7 @@ namespace ld
         void Activate(Hit const& hit);
 
     private:
-        enum class Kind { Agents, PullRequests, Today, Ports, Log };
+        enum class Kind { Agents, PullRequests, Today, Ports, Worktrees, Log };
         enum class RowStyle { Section, Two, One, Mono, Empty };
         struct Row
         {
@@ -102,6 +104,7 @@ namespace ld
         Graphics* m_graphics = nullptr;
         wuc::Compositor m_c{ nullptr };
         SceneLayout m_layout;
+        RECT m_reserved{};
         ScenePreset m_preset;
         bool m_logTail = false;
         bool m_requested = false;
@@ -120,7 +123,8 @@ namespace ld
         CalendarSnapshot m_calendar;
         PortsSnapshot m_ports;
         LogTailSnapshot m_log;
-        bool m_haveSessions = false, m_havePrs = false, m_haveCalendar = false, m_havePorts = false, m_haveLog = false;
+        WorktreesSnapshot m_trees;
+        bool m_haveSessions = false, m_havePrs = false, m_haveCalendar = false, m_havePorts = false, m_haveLog = false, m_haveTrees = false;
         TimePoint m_prsAt{};
         uint64_t m_logErrorSerial = 0;
     };

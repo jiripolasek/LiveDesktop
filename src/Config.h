@@ -20,6 +20,11 @@ namespace ld
         ProviderSettings calendar{ true, 300 };
         ProviderSettings ports{ true, 10 };
         ProviderSettings logTail{ false, 2 };
+        ProviderSettings clipboard{ true, 0 };
+        int clipboardItems = 12;
+        ProviderSettings worktrees{ true, 30 };
+        std::vector<std::wstring> worktreePaths; // extra local repos; recent Copilot session repos are added automatically
+        int worktreeMax = 5;
 
         double sessionMaxIdleHours = 8.0;
         int maxOrbs = 8;

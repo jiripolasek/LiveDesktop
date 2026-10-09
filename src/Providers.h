@@ -116,6 +116,30 @@ namespace ld
         int m_mockTick = 0;
     };
 
+    // `git status --porcelain=v2 --branch` over configured repos plus the git roots of recently
+    // active Copilot sessions (workspace.yaml git_root). Read-only: never fetches or writes.
+    class WorktreesProvider final : public SnapshotProvider<WorktreesSnapshot>
+    {
+    public:
+        explicit WorktreesProvider(Config const& config);
+
+    protected:
+        bool PollReal() override;
+        void PollMock() override;
+        std::chrono::milliseconds MockInterval() const override { return std::chrono::seconds(5); }
+
+    private:
+        struct Candidate { std::wstring root; TimePoint activity{}; bool fromSession = false; };
+        std::vector<Candidate> Discover() const;
+        bool Status(Candidate const& c, WorkingTree& tree);
+        std::vector<std::wstring> m_paths;
+        std::wstring m_sessionRoot;
+        std::wstring m_git;
+        int m_max;
+        int m_mockTick = 0;
+        size_t m_lastCount = SIZE_MAX;
+    };
+
     // Watches HKCU\...\Explorer\VirtualDesktops\CurrentVirtualDesktop with RegNotifyChangeKeyValue.
     class VirtualDesktopWatcher
     {

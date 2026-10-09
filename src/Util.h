@@ -41,6 +41,8 @@ namespace ld
     bool RunProcess(std::wstring commandLine, DWORD timeoutMs, ProcessResult& result, std::atomic<bool> const* cancel = nullptr);
 
     void OpenUrl(std::wstring const& url);
+    // Opens an existing local directory in File Explorer (no-op for anything else).
+    void OpenFolder(std::wstring const& path);
 
     struct Rng
     {

@@ -21,7 +21,9 @@ namespace ld
     "system":   { "enabled": true, "intervalSeconds": 3 },
     "calendar": { "enabled": true, "intervalSeconds": 300, "icsUrl": "" },
     "ports":    { "enabled": true, "intervalSeconds": 10 },
-    "logTail":  { "enabled": false, "intervalSeconds": 2, "path": "", "lines": 6 }
+    "logTail":  { "enabled": false, "intervalSeconds": 2, "path": "", "lines": 6 },
+    "clipboard": { "enabled": true, "items": 12 },
+    "worktrees": { "enabled": true, "intervalSeconds": 30, "max": 5, "paths": [] }
   },
   "scenes": {
     "default": "default",
@@ -132,6 +134,20 @@ namespace ld
         auto logTail = Object(providers, L"logTail");
         cfg.logPath = String(logTail, L"path", L"");
         cfg.logLines = std::clamp(static_cast<int>(Number(logTail, L"lines", cfg.logLines)), 1, 20);
+        auto clipboard = Object(providers, L"clipboard");
+        cfg.clipboard.enabled = Bool(clipboard, L"enabled", cfg.clipboard.enabled);
+        cfg.clipboardItems = std::clamp(static_cast<int>(Number(clipboard, L"items", cfg.clipboardItems)), 3, 24);
+        ReadProvider(providers, L"worktrees", cfg.worktrees);
+        cfg.worktrees.intervalSeconds = std::max(cfg.worktrees.intervalSeconds, 10);
+        auto worktrees = Object(providers, L"worktrees");
+        cfg.worktreeMax = std::clamp(static_cast<int>(Number(worktrees, L"max", cfg.worktreeMax)), 1, 8);
+        if (worktrees && worktrees.HasKey(L"paths") && worktrees.GetNamedValue(L"paths").ValueType() == wdj::JsonValueType::Array)
+        {
+            for (auto const& v : worktrees.GetNamedArray(L"paths"))
+            {
+                if (v.ValueType() == wdj::JsonValueType::String && !v.GetString().empty()) cfg.worktreePaths.emplace_back(v.GetString());
+            }
+        }
 
         auto scenes = Object(root, L"scenes");
         cfg.defaultScene = ToLower(String(scenes, L"default", cfg.defaultScene));

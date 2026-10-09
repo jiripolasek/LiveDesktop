@@ -32,6 +32,10 @@ add_executable(LiveDesktop
     src/Ambient.cpp
     src/Dashboard.cpp
     src/Reveal.cpp
+    src/Clipboard.cpp
+    src/ClipboardStack.cpp
+    src/DropWindow.cpp
+    src/WorktreesProvider.cpp
     src/LiveDesktop.manifest
 )
 
