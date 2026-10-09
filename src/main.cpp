@@ -816,6 +816,35 @@ namespace
                 IsDesktopAt(pt) ? 1 : 0, g_app.icons.HitTestIcon(pt) ? 1 : 0, g_app.dashboard.InsideCard(local) ? 1 : 0,
                 hit ? hit->url.c_str() : L"-", agent ? agent->c_str() : L"-");
         }
+        else if (cmd == L"agents?")
+        {
+            // Diagnostic: scan the host and log where each animal can be clicked (screen coordinates).
+            ReplyMessage(TRUE);
+            RECT rc{};
+            GetClientRect(g_app.host.Hwnd(), &rc);
+            POINT origin{};
+            MapWindowPoints(g_app.host.Hwnd(), HWND_DESKTOP, &origin, 1);
+            std::map<std::wstring, std::pair<float2, int>> found;
+            for (LONG y = 0; y < rc.bottom; y += 12)
+                for (LONG x = 0; x < rc.right; x += 12)
+                {
+                    POINT pt{ origin.x + x, origin.y + y };
+                    if (auto agent = g_app.scene.HitAgent(ToLocal(pt)))
+                    {
+                        auto& [sum, n] = found[*agent];
+                        sum += float2(static_cast<float>(pt.x), static_cast<float>(pt.y));
+                        ++n;
+                    }
+                }
+            Log(L"agents? %zu clickable animal(s)", found.size());
+            for (auto const& [id, acc] : found)
+            {
+                POINT c{ static_cast<LONG>(acc.first.x / acc.second), static_cast<LONG>(acc.first.y / acc.second) };
+                bool hits = g_app.scene.HitAgent(ToLocal(c)) == id;
+                Log(L"  agent %s at %ld,%ld (area %d cells, centre hits=%d, icon=%d)", id.c_str(), c.x, c.y, acc.second, hits ? 1 : 0,
+                    g_app.icons.HitTestIcon(c) ? 1 : 0);
+            }
+        }
         else Log(L"Unknown command '%s'", cmd.c_str());
     }
 
@@ -892,6 +921,7 @@ namespace
             if (auto agent = g_app.scene.HitAgent(local))
             {
                 // Animals open their session on button-up, like the cards.
+                Log(L"Click down %ld,%ld -> agent %s", pt.x, pt.y, agent->c_str());
                 g_app.click = PendingClick{ true, pt, GetTickCount64(), {}, std::nullopt, agent };
                 return 0;
             }
@@ -907,8 +937,16 @@ namespace
             g_app.click.active = false;
             POINT pt{ static_cast<LONG>(wParam), static_cast<LONG>(lParam) };
             if (std::abs(pt.x - g_app.click.screen.x) > 6 || std::abs(pt.y - g_app.click.screen.y) > 6 ||
-                GetTickCount64() - g_app.click.tick > 600) return 0;
-            if (!IsDesktopAt(pt) || g_app.icons.HitTestIcon(pt)) return 0;
+                GetTickCount64() - g_app.click.tick > 600)
+            {
+                Log(L"Click up %ld,%ld ignored: moved or held (%llu ms)", pt.x, pt.y, GetTickCount64() - g_app.click.tick);
+                return 0;
+            }
+            if (!IsDesktopAt(pt) || g_app.icons.HitTestIcon(pt))
+            {
+                Log(L"Click up %ld,%ld ignored: not desktop or on an icon", pt.x, pt.y);
+                return 0;
+            }
             float2 local = ToLocal(pt);
             if (g_app.click.clip)
             {
@@ -921,7 +959,11 @@ namespace
             }
             if (g_app.click.agent)
             {
-                if (g_app.scene.HitAgent(local) != g_app.click.agent) return 0;
+                if (g_app.scene.HitAgent(local) != g_app.click.agent)
+                {
+                    Log(L"Click up %ld,%ld ignored: animal moved away", pt.x, pt.y);
+                    return 0;
+                }
                 std::wstring id = *g_app.click.agent;
                 int delay = g_app.scene.ActivateAgent(id);
                 std::wstring url = L"ghapp://sessions/" + id;
