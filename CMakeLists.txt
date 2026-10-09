@@ -29,6 +29,8 @@ add_executable(LiveDesktop
     src/Visuals.cpp
     src/Graphics.cpp
     src/Ambient.cpp
+    src/Dashboard.cpp
+    src/Reveal.cpp
     src/LiveDesktop.manifest
 )
 
