@@ -28,6 +28,7 @@ add_executable(LiveDesktop
     src/CalendarProvider.cpp
     src/Visuals.cpp
     src/Graphics.cpp
+    src/Ambient.cpp
     src/LiveDesktop.manifest
 )
 
