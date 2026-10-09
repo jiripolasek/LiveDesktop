@@ -43,7 +43,17 @@ namespace ld
         void PointerMoved(float2 pos, bool overDesktop);
         void Click(float2 pos);
         void SetPaused(bool paused);
+        bool Paused() const { return m_paused; }
         void Shutdown();
+
+        wuc::Compositor Compositor() const { return m_ctx.compositor; }
+        SceneContext const& Context() const { return m_ctx; }
+        // Above the wallpaper effect: ambient layer and dashboard live here and survive effect switches.
+        wuc::ContainerVisual Overlay() const { return m_overlay; }
+        // The wallpaper effect container (used to tint/dim the whole effect, e.g. focus scene).
+        wuc::ContainerVisual EffectRoot() const { return m_effectRoot; }
+        winrt::Windows::System::DispatcherQueue Queue() const { return m_dispatcher ? m_dispatcher.DispatcherQueue() : nullptr; }
+        std::function<void(float2)> OnResized;
 
     private:
         void Rebuild(bool crossfade);
@@ -51,6 +61,8 @@ namespace ld
         winrt::Windows::System::DispatcherQueueController m_dispatcher{ nullptr };
         SceneContext m_ctx;
         wuc::ContainerVisual m_root{ nullptr };
+        wuc::ContainerVisual m_effectRoot{ nullptr };
+        wuc::ContainerVisual m_overlay{ nullptr };
         wuc::ContainerVisual m_layer{ nullptr };
         wuc::Desktop::DesktopWindowTarget m_target{ nullptr };
         wuc::Vector3KeyFrameAnimation m_followAnimation{ nullptr };

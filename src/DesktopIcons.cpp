@@ -81,4 +81,36 @@ namespace ld
             return false;
         }
     }
+
+    bool DesktopIcons::IconRects(std::vector<RECT>& rects)
+    {
+        rects.clear();
+        if (!Ensure()) return false;
+        try
+        {
+            POINT spacing{};
+            winrt::check_hresult(m_view->GetSpacing(&spacing));
+            winrt::com_ptr<IEnumIDList> items;
+            winrt::check_hresult(m_view->Items(SVGIO_ALLVIEW, IID_PPV_ARGS(items.put())));
+            if (!items) return true;
+            PITEMID_CHILD pidl = nullptr;
+            while (items->Next(1, &pidl, nullptr) == S_OK)
+            {
+                POINT pos{};
+                if (SUCCEEDED(m_view->GetItemPosition(pidl, &pos)))
+                {
+                    POINT topLeft = pos;
+                    ClientToScreen(m_listView, &topLeft);
+                    rects.push_back(RECT{ topLeft.x, topLeft.y, topLeft.x + spacing.x, topLeft.y + spacing.y });
+                }
+                CoTaskMemFree(pidl);
+            }
+            return true;
+        }
+        catch (winrt::hresult_error const&)
+        {
+            Reset();
+            return false;
+        }
+    }
 }

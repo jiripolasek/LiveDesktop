@@ -26,6 +26,8 @@ add_executable(LiveDesktop
     src/GitHubProvider.cpp
     src/SystemProviders.cpp
     src/CalendarProvider.cpp
+    src/Visuals.cpp
+    src/Graphics.cpp
     src/LiveDesktop.manifest
 )
 

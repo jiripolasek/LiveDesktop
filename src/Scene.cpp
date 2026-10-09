@@ -41,6 +41,10 @@ namespace ld
 
         m_ctx.compositor = wuc::Compositor();
         m_root = m_ctx.compositor.CreateContainerVisual();
+        m_effectRoot = m_ctx.compositor.CreateContainerVisual();
+        m_overlay = m_ctx.compositor.CreateContainerVisual();
+        m_root.Children().InsertAtBottom(m_effectRoot);
+        m_root.Children().InsertAtTop(m_overlay);
 
         m_ctx.pointer = m_ctx.compositor.CreatePropertySet();
         m_ctx.pointer.InsertVector3(L"Position", float3(-10000.0f, -10000.0f, 0.0f));
@@ -89,7 +93,10 @@ namespace ld
         m_ctx.monitors = std::move(monitors);
         m_ctx.pointer.InsertScalar(L"Radius", PointerRadius(m_ctx.monitors));
         m_root.Size(size);
+        m_effectRoot.Size(size);
+        m_overlay.Size(size);
         Rebuild(false);
+        if (OnResized) OnResized(size);
     }
 
     void Scene::NextEffect()
@@ -120,7 +127,7 @@ namespace ld
 
         auto old = m_layer;
         m_layer = layer;
-        m_root.Children().InsertAtTop(layer);
+        m_effectRoot.Children().InsertAtTop(layer);
 
         if (old && crossfade)
         {
@@ -131,7 +138,7 @@ namespace ld
             auto batch = c.CreateScopedBatch(wuc::CompositionBatchTypes::Animation);
             layer.StartAnimation(L"Opacity", fadeIn);
             batch.End();
-            auto root = m_root;
+            auto root = m_effectRoot;
             batch.Completed([root, old](auto&&, auto&&)
             {
                 root.Children().Remove(old);
@@ -140,7 +147,7 @@ namespace ld
         }
         else if (old)
         {
-            m_root.Children().Remove(old);
+            m_effectRoot.Children().Remove(old);
             CloseTree(old);
         }
     }
@@ -194,7 +201,9 @@ namespace ld
         m_effects.clear();
         m_followAnimation = nullptr;
         m_strengthAnimation = nullptr;
-        if (m_root) { m_root.Close(); m_root = nullptr; }
+        if (m_overlay) { CloseTree(m_overlay); m_overlay = nullptr; }
+        if (m_effectRoot) { m_effectRoot.Close(); m_effectRoot = nullptr; }
+        if (m_root) { m_root.Children().RemoveAll(); m_root.Close(); m_root = nullptr; }
         if (m_ctx.pointer) { m_ctx.pointer.Close(); m_ctx.pointer = nullptr; }
         if (m_ctx.compositor) { m_ctx.compositor.Close(); m_ctx.compositor = nullptr; }
 

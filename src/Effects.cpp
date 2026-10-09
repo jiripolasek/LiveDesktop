@@ -1,5 +1,7 @@
 #include "pch.h"
 #include "Scene.h"
+#include "Util.h"
+#include "Visuals.h"
 
 using namespace std::chrono_literals;
 using winrt::Windows::UI::Color;
@@ -9,23 +11,6 @@ namespace ld
 {
     namespace
     {
-        Color Argb(uint8_t a, uint32_t rgb)
-        {
-            return Color{ a, static_cast<uint8_t>(rgb >> 16), static_cast<uint8_t>(rgb >> 8), static_cast<uint8_t>(rgb) };
-        }
-
-        TimeSpan Seconds(float s)
-        {
-            return std::chrono::duration_cast<TimeSpan>(std::chrono::duration<float>(s));
-        }
-
-        struct Rng
-        {
-            std::mt19937 gen{ std::random_device{}() };
-            float Next(float lo, float hi) { return std::uniform_real_distribution<float>(lo, hi)(gen); }
-            size_t Index(size_t count) { return std::uniform_int_distribution<size_t>(0, count - 1)(gen); }
-        };
-
         float Area(RECT const& rc) { return static_cast<float>(rc.right - rc.left) * static_cast<float>(rc.bottom - rc.top); }
 
         RECT const& PickMonitor(SceneContext const& ctx, Rng& rng)
@@ -44,80 +29,6 @@ namespace ld
         float2 RandomPointIn(RECT const& rc, Rng& rng, float margin = 0.0f)
         {
             return float2(rng.Next(rc.left - margin, rc.right + margin), rng.Next(rc.top - margin, rc.bottom + margin));
-        }
-
-        // Soft "blurred" disc without any blur effect: radial gradient from color to fully transparent.
-        wuc::CompositionRadialGradientBrush GlowBrush(wuc::Compositor const& c, Color color, float midStop = 0.4f, float midAlpha = 0.35f)
-        {
-            auto brush = c.CreateRadialGradientBrush();
-            brush.EllipseCenter(float2(0.5f, 0.5f));
-            brush.EllipseRadius(float2(0.5f, 0.5f));
-            Color mid = color;
-            mid.A = static_cast<uint8_t>(color.A * midAlpha);
-            Color end = color;
-            end.A = 0;
-            brush.ColorStops().Append(c.CreateColorGradientStop(0.0f, color));
-            brush.ColorStops().Append(c.CreateColorGradientStop(midStop, mid));
-            brush.ColorStops().Append(c.CreateColorGradientStop(1.0f, end));
-            return brush;
-        }
-
-        // Transparent center, bright band, transparent edge -> a ring.
-        wuc::CompositionRadialGradientBrush RingBrush(wuc::Compositor const& c, Color color)
-        {
-            auto brush = c.CreateRadialGradientBrush();
-            Color clear = color;
-            clear.A = 0;
-            brush.ColorStops().Append(c.CreateColorGradientStop(0.0f, clear));
-            brush.ColorStops().Append(c.CreateColorGradientStop(0.62f, clear));
-            brush.ColorStops().Append(c.CreateColorGradientStop(0.82f, color));
-            brush.ColorStops().Append(c.CreateColorGradientStop(1.0f, clear));
-            return brush;
-        }
-
-        // Looping wander around `base` (ends where it starts so the loop is seamless).
-        wuc::Vector3KeyFrameAnimation Drift(wuc::Compositor const& c, Rng& rng, float3 base, float range, int keys, float seconds)
-        {
-            auto ease = c.CreateCubicBezierEasingFunction(float2(0.45f, 0.0f), float2(0.55f, 1.0f));
-            auto anim = c.CreateVector3KeyFrameAnimation();
-            anim.InsertKeyFrame(0.0f, base);
-            for (int i = 1; i < keys; ++i)
-            {
-                anim.InsertKeyFrame(static_cast<float>(i) / keys,
-                    base + float3(rng.Next(-range, range), rng.Next(-range, range), 0.0f), ease);
-            }
-            anim.InsertKeyFrame(1.0f, base, ease);
-            anim.Duration(Seconds(seconds));
-            anim.IterationBehavior(wuc::AnimationIterationBehavior::Forever);
-            return anim;
-        }
-
-        wuc::ScalarKeyFrameAnimation Oscillate(wuc::Compositor const& c, float from, float to, float seconds, float delay = 0.0f)
-        {
-            auto ease = c.CreateCubicBezierEasingFunction(float2(0.45f, 0.0f), float2(0.55f, 1.0f));
-            auto anim = c.CreateScalarKeyFrameAnimation();
-            anim.InsertKeyFrame(0.0f, from);
-            anim.InsertKeyFrame(1.0f, to, ease);
-            anim.Duration(Seconds(seconds));
-            anim.DelayTime(Seconds(delay));
-            anim.Direction(wuc::AnimationDirection::Alternate);
-            anim.IterationBehavior(wuc::AnimationIterationBehavior::Forever);
-            return anim;
-        }
-
-        wuc::ColorKeyFrameAnimation CycleColors(wuc::Compositor const& c, std::initializer_list<Color> colors, float seconds)
-        {
-            auto ease = c.CreateCubicBezierEasingFunction(float2(0.45f, 0.0f), float2(0.55f, 1.0f));
-            auto anim = c.CreateColorKeyFrameAnimation();
-            std::vector<Color> list(colors);
-            for (size_t i = 0; i < list.size(); ++i)
-            {
-                anim.InsertKeyFrame(static_cast<float>(i) / list.size(), list[i], ease);
-            }
-            anim.InsertKeyFrame(1.0f, list.front(), ease);
-            anim.Duration(Seconds(seconds));
-            anim.IterationBehavior(wuc::AnimationIterationBehavior::Forever);
-            return anim;
         }
 
         // Cursor-following light shared by all effects.
@@ -150,42 +61,6 @@ namespace ld
             L"(pointer.Position - anchor.Offset - Vector3(half, half, 0.0))"
             L" * (pull * pointer.Strength"
             L"    * Max(0.0, 1.0 - Length(pointer.Position - anchor.Offset - Vector3(half, half, 0.0)) / (pointer.Radius * 1.3)))";
-
-        void SpawnRipple(SceneContext const& ctx, wuc::ContainerVisual const& layer, float2 pos, Color color, float diameter, float delay)
-        {
-            auto const& c = ctx.compositor;
-            auto ring = c.CreateSpriteVisual();
-            ring.Size(float2(diameter, diameter));
-            ring.AnchorPoint(float2(0.5f, 0.5f));
-            ring.Offset(float3(pos.x, pos.y, 0.0f));
-            ring.CenterPoint(float3(diameter * 0.5f, diameter * 0.5f, 0.0f));
-            ring.Scale(float3(0.02f, 0.02f, 1.0f));
-            ring.Opacity(0.0f);
-            ring.Brush(RingBrush(c, color));
-            layer.Children().InsertAtTop(ring);
-
-            auto easeOut = c.CreateCubicBezierEasingFunction(float2(0.1f, 0.7f), float2(0.3f, 1.0f));
-            auto scale = c.CreateVector3KeyFrameAnimation();
-            scale.InsertKeyFrame(0.0f, float3(0.02f, 0.02f, 1.0f));
-            scale.InsertKeyFrame(1.0f, float3(1.0f, 1.0f, 1.0f), easeOut);
-            scale.Duration(1300ms);
-            scale.DelayTime(Seconds(delay));
-            auto fade = c.CreateScalarKeyFrameAnimation();
-            fade.InsertKeyFrame(0.0f, 1.0f);
-            fade.InsertKeyFrame(1.0f, 0.0f, c.CreateCubicBezierEasingFunction(float2(0.5f, 0.0f), float2(0.9f, 0.6f)));
-            fade.Duration(1300ms);
-            fade.DelayTime(Seconds(delay));
-
-            auto batch = c.CreateScopedBatch(wuc::CompositionBatchTypes::Animation);
-            ring.StartAnimation(L"Scale", scale);
-            ring.StartAnimation(L"Opacity", fade);
-            batch.End();
-            batch.Completed([layer, ring](auto&&, auto&&)
-            {
-                layer.Children().Remove(ring);
-                ring.Close();
-            });
-        }
 
         // ------------------------------------------------------------------------------------------
         // Aurora: rotating gradient sky, swaying aurora curtains, drifting glow orbs that dodge the

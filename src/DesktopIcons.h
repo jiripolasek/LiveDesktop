@@ -10,6 +10,8 @@ namespace ld
     public:
         // Returns true if `screenPt` lies over an icon. On any failure returns false (=> treat as empty).
         bool HitTestIcon(POINT screenPt);
+        // Screen-space bounds of every desktop icon cell. Returns false if the view is unavailable.
+        bool IconRects(std::vector<RECT>& rects);
         void Reset() { m_view = nullptr; m_listView = nullptr; }
 
     private:
