@@ -7,9 +7,14 @@ the input path.
 
 | Effect | What it does |
 | --- | --- |
+| **Meadow** (default) | A living landscape that follows the **real time of day**: layered hills with atmospheric haze, a sky that moves through night, blue hour, sunrise, day and golden hour, drifting clouds, stars and the odd shooting star. Hundreds of grass tufts and wildflowers sway in **traveling gusts of wind**. The cursor brushes through the grass, fireflies come out at night, and a click on empty desktop space sends a gust ring and releases dandelion seeds. |
 | **Aurora** | Rotating gradient sky, waving aurora curtains, and soft orbs that drift and **move away from the cursor**. Clicking empty desktop space sends out ripples. |
 | **Fireflies** | Night sky with nebula glows and hundreds of twinkling sparks that **gather toward the cursor**. Clicking empty desktop space gives a spark burst and a ripple. |
 | **Ember** | The Aurora scene with a warm palette. |
+
+| Meadow: day | Meadow: golden hour | Meadow: night |
+| --- | --- | --- |
+| ![Meadow at midday](docs/screenshots/meadow-day.jpg) | ![Meadow at golden hour](docs/screenshots/meadow-golden.jpg) | ![Meadow at night](docs/screenshots/meadow-night.jpg) |
 
 All motion is driven by composition key-frame and expression animations that run in DWM. The app
 only does work when the mouse moves or data changes, so its own CPU use stays near zero (see
@@ -21,6 +26,8 @@ On top of that, LiveDesktop is an **Ambient Dev Desktop** prototype:
   fireflies, a subtle system pulse and a next-meeting horizon.
 - A **productivity dashboard** of glassy, clickable cards that appears when you reveal the desktop
   (Win+D).
+- A **clipboard shelf** in the bottom-right corner: your recent clipboard history as a stack of
+  cards. Click one to put it back on the clipboard, or drag files or text onto it to keep them there.
 
 | Ambient: agent orbs + meeting horizon | Ambient: one of my PRs has failing checks |
 | --- | --- |
@@ -56,7 +63,7 @@ build\LiveDesktop.exe                 :: start with real data providers (console
 build\LiveDesktop.exe --mock          :: realistic fake data for every provider (no credentials needed)
 build\LiveDesktop.exe --mock --dashboard   :: ...and force the dashboard on (no Win+D needed)
 build\LiveDesktop.exe --scene focus   :: force a scene: default | work | focus
-build\LiveDesktop.exe --effect 1      :: start with Fireflies
+build\LiveDesktop.exe --effect 1      :: start with Aurora (0 Meadow, 1 Aurora, 2 Fireflies, 3 Ember)
 build\LiveDesktop.exe --next          :: switch effect in the running instance
 build\LiveDesktop.exe --send <cmd>    :: send a command to the running instance (see below)
 build\LiveDesktop.exe --stop          :: exit the running instance cleanly
@@ -64,11 +71,15 @@ build\LiveDesktop.exe --exit-after 30 :: auto-exit after 30 s (testing)
 ```
 
 - **Tray icon:** left-click switches to the next effect. Right-click opens a menu with *Next effect*,
-  *Next scene*, *Force dashboard*, *Mock data*, *Pause animations* and *Exit*.
+  *Next scene*, *Force dashboard*, *Mock data*, *Clipboard shelf*, *Pause animations* and *Exit*.
 - **`--send` commands** (handy for demos and screenshots): `next-effect`, `effect:<n>`, `next-scene`,
   `scene:<default|work|focus|auto>`, `dashboard:<on|off|auto>`, `mock:<on|off>`,
   `ci:<red|green|mixed>` (mock CI state), `log:<error|ok>` (mock log line), `pause`, `stop`, and
   `hit:<x>,<y>` (logs what a click at that screen point would do, without clicking).
+  - Meadow: `time:<dawn|sunrise|morning|day|afternoon|golden|sunset|dusk|night|HH:MM|auto>` pins
+    the light to a time of day (`auto` follows the clock).
+  - Clipboard shelf: `stack:<open|close|auto>` (fan out / collapse), `stack:<drop|nodrop>` (preview
+    the drop target), `stack:<on|off>`, and `clip:<text>` (push text onto the shelf and clipboard).
 - **Ctrl+C**, the tray **Exit** item, or `WM_CLOSE` all exit cleanly. LiveDesktop removes its window
   and re-applies the current wallpaper so the desktop repaints.
 - **Log:** `LiveDesktop.log` is written next to the exe (or `%TEMP%` if that folder isn't writable). It
@@ -208,7 +219,9 @@ thread, polls (or watches) its source and posts an **immutable snapshot** to the
     "system":   { "enabled": true, "intervalSeconds": 3 },
     "calendar": { "enabled": true, "intervalSeconds": 300, "icsUrl": "" },   // https ICS feed
     "ports":    { "enabled": true, "intervalSeconds": 10 },
-    "logTail":  { "enabled": false, "intervalSeconds": 2, "path": "", "lines": 6 }
+    "logTail":  { "enabled": false, "intervalSeconds": 2, "path": "", "lines": 6 },
+    "clipboard": { "enabled": true, "items": 12 },                           // history size, 3-24
+    "worktrees": { "enabled": true, "intervalSeconds": 30, "max": 5, "paths": [] }   // extra local repos
   },
   "scenes": {
     "default": "default",            // scene for unmapped virtual desktops
@@ -300,6 +313,13 @@ out. Cards:
   services.
 - **Dev log** ("work" scene, when `logTail.path` is set): the last N lines, highlighted and flashing
   on lines matching error / fail / exception / fatal.
+- **Working trees** (`WorktreesProvider.cpp`): the repos you're actually touching, showing branch,
+  ahead/behind and staged / modified / new counts, colored by state (conflicts → red, dirty → amber,
+  unpushed → blue, clean → green). Repos come from `worktrees.paths` plus the `git_root` of every
+  Copilot session active in the last 7 days, so the repos your agents are working in appear
+  automatically. Each repo runs `git --no-optional-locks status --porcelain=v2 --branch` every 30 s,
+  which never takes `index.lock` and never touches the network. Clicking a row opens the folder in
+  Explorer.
 
 The cards are glass: a tinted semi-transparent fill, a generated noise texture, a 1 px highlight
 border, rounded corners and a `DropShadow`. Text uses Segoe UI Variable and Segoe Fluent Icons.
@@ -335,6 +355,50 @@ preset:
 
 Switching desktops clears a scene override set from the tray (*Next scene*).
 
+### Clipboard shelf
+
+The bottom-right corner of the desktop holds your recent clipboard history as a **stack of glass
+cards**. It is always visible; in the focus scene it is dimmed.
+
+- **Peek:** the top three cards are stacked like a deck under a "CLIPBOARD · n" caption. Each card
+  shows a type glyph, a preview, the source app and how long ago it was copied.
+- **Fan out:** hovering over the stack spreads it into a column of up to 8 cards.
+- **Copy:** clicking a card puts it back on the clipboard (same click rules as the dashboard), and a
+  small "Copied" toast confirms it.
+- **Kinds:** cards are typed. Text, code (multi-line with code markers), shell commands, URLs, colors
+  (`#rrggbb` / `rgb()`, shown with a swatch), images (`CF_DIB`, shown as a thumbnail) and files
+  (`CF_HDROP`, shown with names and count).
+- **Drag to keep:** drag files or text from any app onto the stack and they are stored as a new card
+  and placed on the clipboard. Dropped files are referenced, not copied or moved.
+
+**How capture works** (`Clipboard.cpp`). A dedicated thread owns a message-only window registered with
+`AddClipboardFormatListener`. On `WM_CLIPBOARDUPDATE` it opens the clipboard with a short retry,
+copies what it needs and closes it right away. Identical consecutive copies are merged, and a copy
+of an existing item moves it to the top.
+
+**Privacy.** History lives **in memory only** and is never written to disk or the log. Content is
+skipped when the source app marks it private, using the same conventions as Windows clipboard
+history and password managers:
+
+- `ExcludeClipboardContentFromMonitorProcessing`;
+- `CanIncludeInClipboardHistory` = 0;
+- `Clipboard Viewer Ignore`.
+
+Text that looks like a token (`ghp_…`, `github_pat_…`, `sk-…`, `xoxb-…`, `AKIA…`, JWTs …) is kept
+but **shown masked** ("Secret, hidden"). Turning the shelf off from the tray or with
+`--send stack:off` stops the listener and clears the history.
+
+**Drop target without blocking the desktop** (`DropWindow.cpp`). The wallpaper window can't take part
+in OLE drag and drop, because it is never in the input path. Instead the mouse hook watches for a
+left-button drag (more than 8 px) that enters the shelf's drop zone over the desktop. Only then does
+LiveDesktop show a small, nearly transparent (`WS_EX_LAYERED`, alpha 1), topmost,
+`WS_EX_NOACTIVATE` window over the zone, registered with `RegisterDragDrop`.
+
+- The window uses `IDropTargetHelper`, so the drag image keeps rendering.
+- It accepts `CF_HDROP` and text with **`DROPEFFECT_COPY` only**, and lights up the shelf while hovered.
+- It is hidden as soon as the drag leaves the zone, or 500 ms after the button is released.
+- Outside of a drag it doesn't exist on screen, so it never intercepts clicks.
+
 ### What's real and what's mocked
 
 | Provider | Real source | Status on the dev machine |
@@ -345,6 +409,8 @@ Switching desktops clears a scene override set from the tray (*Next scene*).
 | Dev ports | `GetExtendedTcpTable` | **Real.** Shows "No dev servers listening" when nothing is running. |
 | Calendar | `AppointmentStore`, then `icsUrl`, then mock | **Partly real.** `AppointmentStore` opened from the unpackaged exe but held no meetings, because Outlook/Microsoft 365 calendars aren't synced into the Windows calendar store. Set `icsUrl` (e.g. an Outlook "publish calendar" ICS link) for real meetings. If neither source is available, the provider falls back to mock meetings. |
 | Dev log | file tail (`logTail.path`) | **Real** when configured; off by default. |
+| Working trees | `git status --porcelain=v2` | **Real.** Picked up 5 repos from recent sessions (e.g. `LiveDesktop@main`, 17 changed files). |
+| Clipboard shelf | `AddClipboardFormatListener` | **Real** clipboard. `--mock` seeds the shelf with sample items (code, URL, color, command, image, files, a masked token, text). |
 
 ### Performance
 
@@ -390,6 +456,11 @@ wakes only for pointer moves, provider snapshots and a 5 s tick for relative-tim
   events (`RRULE`) are not expanded.
 - **GitHub.** Polling uses `gh` and its rate limit. The default interval is 2 min, and back-off kicks in
   on errors.
+- **Clipboard.** The shelf only sees what reaches the clipboard while LiveDesktop runs. Its history
+  is in memory and is lost on exit. Delayed-rendered formats are materialized when the clipboard
+  changes, which is what all clipboard managers do. Only text, files and images are kept: rich
+  formats (HTML, RTF, app-private) are not, so copying a card back gives plain text. Dropping onto
+  the shelf needs the shelf's corner of the desktop to be visible.
 - **Privacy in screenshots.** Real session titles and PR titles appear on the desktop. The screenshots
   in `docs/screenshots` were taken with `--mock`.
 - **Not a product.** This is a proof of concept: there is no installer, no autostart and no settings
@@ -404,6 +475,7 @@ src/main.cpp            controller window, tray, hook thread, timers, commands, 
 src/DesktopHost.*       WorkerW / 24H2 discovery, parenting, z-order, bounds
 src/Scene.*             compositor, DesktopWindowTarget, pointer property set, pause, effect switching
 src/Effects.cpp         Aurora / Fireflies / Ember wallpaper effects
+src/Meadow.cpp          Meadow: time-of-day landscape, wind-swept grass, flowers, fireflies
 src/Ambient.*           ambient layer: agent orbs, CI tide, fireflies, system pulse, horizon, focus timer
 src/Dashboard.*         glass cards, layout around icons, hit test / hover / click targets
 src/Reveal.*            WinEvent-based "desktop revealed" / "fully occluded" detection
@@ -418,6 +490,10 @@ src/SessionsProvider.cpp  Copilot session-state reader
 src/GitHubProvider.cpp  gh CLI PRs / checks / review requests
 src/CalendarProvider.cpp  AppointmentStore / ICS / mock
 src/SystemProviders.cpp CPU / memory / GPU, listening ports, log tail, virtual desktop watch
+src/WorktreesProvider.cpp  git status of configured repos + repos of recent Copilot sessions
+src/Clipboard.*         clipboard listener thread, privacy filters, history, copy-back
+src/ClipboardStack.*    clipboard shelf visuals (peek / fan / drop zone / toast)
+src/DropWindow.*        transient OLE drop target shown only while dragging onto the shelf
 src/DesktopIcons.*      IFolderView-based icon positions and hit test
 src/Util.*              process spawning, strings, time formatting
 src/AppIcon.cpp         tray icon generated at runtime
