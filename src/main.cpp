@@ -14,6 +14,8 @@
 #include "ClipboardStack.h"
 #include "DropWindow.h"
 #include "Util.h"
+#include "Snapshot.h"
+#include <map>
 
 namespace ld { HICON CreateAppIcon(int size); }
 
@@ -87,6 +89,7 @@ namespace
         ULONGLONG tick = 0;
         Dashboard::Hit hit;
         std::optional<uint64_t> clip;
+        std::optional<std::wstring> agent;
     };
 
     struct App
@@ -102,6 +105,7 @@ namespace
         bool trayAdded = false;
         bool exiting = false;
         bool userPaused = false;
+        bool forceRender = false;          // --send render:on: keep animating while covered (offscreen snapshots)
         bool fullscreenPaused = false;
         int reattachAttempts = 0;
         std::wstring displaySignature;
@@ -130,6 +134,10 @@ namespace
         DropWindow drop;
         bool buttonDown = false;           // left button held anywhere (drag-to-shelf detection)
         POINT downAt{};
+        // Last sessions snapshot from the provider, plus statuses forced via --send agent:<n>:<state>.
+        std::optional<SessionsSnapshot> sessions;
+        std::map<std::wstring, std::pair<AgentStatus, TimePoint>> agentOverrides;
+        winrt::Windows::System::DispatcherQueueTimer agentOpenTimer{ nullptr };
     };
 
     App g_app;
@@ -258,7 +266,7 @@ namespace
     void UpdatePaused()
     {
         // Fully occluded means nothing of the desktop is visible, so even a forced dashboard can stop rendering.
-        bool heavy = g_app.fullscreenPaused || g_app.occluded;
+        bool heavy = !g_app.forceRender && (g_app.fullscreenPaused || g_app.occluded);
         bool paused = g_app.userPaused || heavy;
         if (paused != g_app.scene.Paused())
         {
@@ -657,6 +665,80 @@ namespace
         DestroyWindow(g_app.controller);
     }
 
+    // Sessions from the provider with any --send agent:<n>:<state> overrides applied, to every consumer.
+    void ForwardSessions()
+    {
+        if (!g_app.sessions) return;
+        SessionsSnapshot s = *g_app.sessions;
+        if (!g_app.agentOverrides.empty())
+        {
+            for (auto& session : s.sessions)
+                if (auto it = g_app.agentOverrides.find(session.id); it != g_app.agentOverrides.end())
+                {
+                    if (session.status != it->second.first)
+                    {
+                        static constexpr wchar_t const* kDetail[] = { L"Working\u2026", L"Needs your input", L"Task complete", L"" };
+                        auto st = it->second.first;
+                        session.detail = kDetail[st == AgentStatus::Working ? 0 : st == AgentStatus::Waiting ? 1 : st == AgentStatus::Done ? 2 : 3];
+                    }
+                    session.status = it->second.first;
+                    session.since = it->second.second;
+                    session.lastActivity = std::max(session.lastActivity, it->second.second);
+                    if (session.status == AgentStatus::Waiting && session.detail.empty()) session.detail = L"Needs your input";
+                }
+            auto rank = [](AgentStatus st) { return st == AgentStatus::Waiting ? 0 : st == AgentStatus::Working ? 1 : st == AgentStatus::Done ? 2 : 3; };
+            std::stable_sort(s.sessions.begin(), s.sessions.end(), [&](AgentSession const& a, AgentSession const& b) {
+                if (rank(a.status) != rank(b.status)) return rank(a.status) < rank(b.status);
+                return a.lastActivity > b.lastActivity;
+            });
+        }
+        g_app.ambient.Update(s);
+        g_app.dashboard.Update(s);
+        g_app.scene.UpdateSessions(s);
+    }
+
+    // agent:<n|id-prefix>:<working|waiting|done|idle|auto>, agent:list, agent:auto
+    void HandleAgentCommand(std::wstring const& value)
+    {
+        if (!g_app.sessions) { Log(L"agent: no sessions yet"); return; }
+        std::vector<AgentSession const*> list;
+        for (auto const& s : g_app.sessions->sessions) list.push_back(&s);
+        std::sort(list.begin(), list.end(), [](auto* a, auto* b) { return a->id < b->id; });
+        if (value == L"list")
+        {
+            for (size_t i = 0; i < list.size(); ++i)
+                Log(L"  agent %zu: %s %s '%s'", i + 1, list[i]->id.c_str(), AgentStatusName(list[i]->status), list[i]->title.c_str());
+            return;
+        }
+        if (value == L"auto") { g_app.agentOverrides.clear(); ForwardSessions(); return; }
+        size_t colon = value.find(L':');
+        if (colon == std::wstring::npos) { Log(L"agent: expected agent:<n>:<state>"); return; }
+        std::wstring who = value.substr(0, colon), state = value.substr(colon + 1);
+        AgentSession const* target = nullptr;
+        if (!who.empty() && std::all_of(who.begin(), who.end(), iswdigit))
+        {
+            size_t n = static_cast<size_t>(_wtoi(who.c_str()));
+            if (n >= 1 && n <= list.size()) target = list[n - 1];
+        }
+        else
+            for (auto* s : list)
+                if (ToLower(s->id).rfind(who, 0) == 0) { target = s; break; }
+        if (!target) { Log(L"agent: no session '%s' (%zu known)", who.c_str(), list.size()); return; }
+        if (state == L"auto") g_app.agentOverrides.erase(target->id);
+        else
+        {
+            AgentStatus st;
+            if (state == L"working") st = AgentStatus::Working;
+            else if (state == L"waiting") st = AgentStatus::Waiting;
+            else if (state == L"done") st = AgentStatus::Done;
+            else if (state == L"idle") st = AgentStatus::Idle;
+            else { Log(L"agent: unknown state '%s'", state.c_str()); return; }
+            g_app.agentOverrides[target->id] = { st, Clock::now() };
+        }
+        Log(L"agent: '%s' forced %s", target->title.c_str(), state.c_str());
+        ForwardSessions();
+    }
+
     // Commands from `LiveDesktop.exe --send <cmd>` (WM_COPYDATA). Used for scripted demos/screenshots.
     void HandleCommand(std::wstring const& raw)
     {
@@ -666,6 +748,15 @@ namespace
             // Case-preserving: simulates a drop of text onto the shelf.
             Log(L"Command: clip (%zu chars)", trimmed.size() - 5);
             g_app.clipboard.AddText(trimmed.substr(5), L"send");
+            return;
+        }
+        if (ToLower(trimmed.substr(0, 9)) == L"snapshot:")
+        {
+            // Case-preserving path. Captures the composition tree offscreen (works while locked/covered).
+            std::wstring path = trimmed.substr(9);
+            Log(L"Command: snapshot %s", path.c_str());
+            if (auto root = g_app.scene.Root())
+                SnapshotVisual(root, path, [path](bool ok) { Log(L"Snapshot %s: %s", ok ? L"saved" : L"FAILED", path.c_str()); });
             return;
         }
         std::wstring cmd = ToLower(trimmed);
@@ -689,6 +780,8 @@ namespace
         else if (arg(L"dashboard:", value))
             SetDashboardMode(value == L"on" ? DashboardMode::On : value == L"off" ? DashboardMode::Off : DashboardMode::Auto);
         else if (arg(L"mock:", value)) SetMock(value == L"on");
+        else if (arg(L"agent:", value)) HandleAgentCommand(value);
+        else if (arg(L"render:", value)) { g_app.forceRender = value == L"on"; UpdatePaused(); }
         else if (arg(L"stack:", value))
         {
             if (value == L"open") g_app.stack.ForceFan(true);
@@ -718,9 +811,10 @@ namespace
             ReplyMessage(TRUE); // release the sender so the icon COM call isn't an input-synchronous callout
             float2 local = ToLocal(pt);
             auto hit = g_app.dashboard.HitTest(local);
-            Log(L"hit %ld,%ld -> local %.0f,%.0f desktop=%d icon=%d card=%d item=%s", pt.x, pt.y, local.x, local.y,
+            auto agent = g_app.scene.HitAgent(local);
+            Log(L"hit %ld,%ld -> local %.0f,%.0f desktop=%d icon=%d card=%d item=%s agent=%s", pt.x, pt.y, local.x, local.y,
                 IsDesktopAt(pt) ? 1 : 0, g_app.icons.HitTestIcon(pt) ? 1 : 0, g_app.dashboard.InsideCard(local) ? 1 : 0,
-                hit ? hit->url.c_str() : L"-");
+                hit ? hit->url.c_str() : L"-", agent ? agent->c_str() : L"-");
         }
         else Log(L"Unknown command '%s'", cmd.c_str());
     }
@@ -752,6 +846,11 @@ namespace
             if (!g_app.buttonDown) g_app.stack.Hover(over ? std::optional<float2>(local) : std::nullopt);
             if (g_app.dashboard.Visible())
                 g_app.dashboard.Hover(over && !onStack ? std::optional<float2>(local) : std::nullopt);
+            if (g_app.scene.HostsAgents())
+            {
+                bool free = over && !onStack && !(g_app.dashboard.Visible() && g_app.dashboard.InsideCard(local));
+                g_app.scene.HoverAgent(free ? std::optional<float2>(local) : std::nullopt);
+            }
 
             // Something is being dragged towards the shelf: put the (invisible) drop window over it.
             if (g_app.buttonDown && g_app.stack.Enabled() && !g_app.fullscreenPaused &&
@@ -790,6 +889,12 @@ namespace
                     g_app.click = PendingClick{ true, pt, GetTickCount64(), *hit, std::nullopt };
                 return 0;
             }
+            if (auto agent = g_app.scene.HitAgent(local))
+            {
+                // Animals open their session on button-up, like the cards.
+                g_app.click = PendingClick{ true, pt, GetTickCount64(), {}, std::nullopt, agent };
+                return 0;
+            }
             g_app.scene.Click(local);
             return 0;
         }
@@ -812,6 +917,24 @@ namespace
                     g_app.stack.Activate(*g_app.click.clip);
                     g_app.clipboard.Copy(*g_app.click.clip);
                 }
+                return 0;
+            }
+            if (g_app.click.agent)
+            {
+                if (g_app.scene.HitAgent(local) != g_app.click.agent) return 0;
+                std::wstring id = *g_app.click.agent;
+                int delay = g_app.scene.ActivateAgent(id);
+                std::wstring url = L"ghapp://sessions/" + id;
+                Log(L"Meadow: open agent %s in %d ms", url.c_str(), delay);
+                auto timer = g_app.scene.Queue().CreateTimer();
+                timer.Interval(std::chrono::milliseconds(std::max(delay, 1)));
+                timer.IsRepeating(false);
+                timer.Tick([url](winrt::Windows::System::DispatcherQueueTimer const& sender, auto&&) {
+                    sender.Stop();
+                    OpenUrl(url);
+                });
+                timer.Start();
+                g_app.agentOpenTimer = timer;
                 return 0;
             }
             if (!g_app.dashboard.Visible()) return 0;
@@ -1006,6 +1129,8 @@ namespace
                 L"                            log:error|ok | pause | stop | hit:<x>,<y>\n"
                 L"                            time:<dawn|sunrise|morning|day|afternoon|golden|sunset|dusk|night|HH:MM|auto>\n"
                 L"                            stack:open|close|auto|drop|nodrop|on|off | clip:<text>\n"
+                L"                            agent:<n|id-prefix>:<working|waiting|done|idle|auto> | agent:list | agent:auto\n"
+                L"                            render:on|auto (keep animating while covered) | snapshot:<file.png>\n"
                 L"Ctrl+C, the tray menu 'Exit', or WM_CLOSE exit cleanly.\n"
                 L"Config: %%LOCALAPPDATA%%\\LiveDesktop\\config.json (created with defaults on first run).\n");
     }
@@ -1159,6 +1284,8 @@ int wmain(int argc, wchar_t** argv)
     Config providerConfig = g_app.config;
     if (g_app.mock) providerConfig.logTail.enabled = true;
     g_app.ambient.Initialize(g_app.scene, g_app.graphics, g_app.config.focusMinutes);
+    g_app.scene.OnEffectChanged = [] { g_app.ambient.SetOrbsHidden(g_app.scene.HostsAgents()); };
+    g_app.scene.OnEffectChanged();
     g_app.dashboard.Initialize(g_app.scene, g_app.graphics, providerConfig.logTail.enabled);
     g_app.stack.Initialize(g_app.scene, g_app.graphics);
     g_app.stack.SetEnabled(g_app.config.clipboard.enabled);
@@ -1209,7 +1336,7 @@ int wmain(int argc, wchar_t** argv)
         p.logTail = std::make_unique<LogTailProvider>(providerConfig);
         p.worktrees = std::make_unique<WorktreesProvider>(providerConfig);
         p.worktrees->OnSnapshot = [](WorktreesSnapshot const& s) { g_app.dashboard.Update(s); };
-        p.sessions->OnSnapshot = [](SessionsSnapshot const& s) { g_app.ambient.Update(s); g_app.dashboard.Update(s); };
+        p.sessions->OnSnapshot = [](SessionsSnapshot const& s) { g_app.sessions = s; ForwardSessions(); };
         p.github->OnSnapshot = [](PullRequestsSnapshot const& s) { g_app.ambient.Update(s); g_app.dashboard.Update(s); };
         p.system->OnSnapshot = [](SystemSnapshot const& s) { g_app.ambient.Update(s); };
         p.calendar->OnSnapshot = [](CalendarSnapshot const& s) { g_app.ambient.Update(s); g_app.dashboard.Update(s); };

@@ -385,9 +385,16 @@ namespace ld
     {
         if (!m_root) return;
         m_dashboard = visible;
-        Fade(m_orbLayer, visible ? 0.2f : 1.0f, visible ? 0.35f : 0.6f);
+        Fade(m_orbLayer, m_orbsHidden ? 0.0f : visible ? 0.2f : 1.0f, visible ? 0.35f : 0.6f);
         Fade(m_fireflyLayer, visible ? 0.3f : 1.0f, 0.5f);
         if (m_preset.focus) Fade(m_focus, visible ? 0.0f : 1.0f, 0.4f);
+    }
+
+    void Ambient::SetOrbsHidden(bool hidden)
+    {
+        if (!m_root || hidden == m_orbsHidden) return;
+        m_orbsHidden = hidden;
+        Fade(m_orbLayer, hidden ? 0.0f : m_dashboard ? 0.2f : 1.0f, 0.8f);
     }
 
     // ---------------------------------------------------------------- system pulse

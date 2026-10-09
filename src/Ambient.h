@@ -19,6 +19,8 @@ namespace ld
         void SetLayout(SceneLayout const& layout);
         void SetPreset(ScenePreset const& preset);
         void SetDashboardVisible(bool visible);
+        // The wallpaper effect draws the agents itself (Meadow animals): hide the orbs.
+        void SetOrbsHidden(bool hidden);
 
         void Update(SessionsSnapshot const& snapshot);
         void Update(PullRequestsSnapshot const& snapshot);
@@ -75,6 +77,7 @@ namespace ld
         SceneLayout m_layout;
         ScenePreset m_preset;
         bool m_dashboard = false;
+        bool m_orbsHidden = false;
         int m_focusMinutes = 25;
         Rng m_rng;
 

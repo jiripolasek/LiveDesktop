@@ -19,6 +19,8 @@ add_executable(LiveDesktop
     src/Scene.cpp
     src/Effects.cpp
     src/Meadow.cpp
+    src/MeadowAnimals.cpp
+    src/MeadowAnimalsArt.cpp
     src/AppIcon.cpp
     src/Util.cpp
     src/Config.cpp
@@ -36,6 +38,7 @@ add_executable(LiveDesktop
     src/ClipboardStack.cpp
     src/DropWindow.cpp
     src/WorktreesProvider.cpp
+    src/Snapshot.cpp
     src/LiveDesktop.manifest
 )
 
@@ -61,7 +64,7 @@ target_compile_options(LiveDesktop PRIVATE /W4 /permissive- /EHsc /utf-8 /bigobj
 # Console subsystem on purpose: live log output + Ctrl+C handling.
 target_link_libraries(LiveDesktop PRIVATE
     windowsapp CoreMessaging user32 gdi32 shell32 ole32 oleaut32 uuid dwmapi
-    d3d11 d2d1 dwrite dxgi iphlpapi pdh shcore ws2_32 advapi32)
+    d3d11 d2d1 dwrite dxgi iphlpapi pdh shcore ws2_32 advapi32 windowscodecs)
 
 # Static CRT: the POC runs from the build folder without VC++ redist concerns.
 set_property(TARGET LiveDesktop PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

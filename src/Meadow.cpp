@@ -4,6 +4,7 @@
 #include "Visuals.h"
 #include "Graphics.h"
 #include "Log.h"
+#include "MeadowAnimals.h"
 
 // ------------------------------------------------------------------------------------------------
 // Meadow: a living landscape that follows the real time of day. Layered hills with atmospheric
@@ -482,6 +483,16 @@ namespace ld
             void Build(SceneContext const& ctx, wuc::ContainerVisual const& layer) override;
             void OnClick(SceneContext const& ctx, wuc::ContainerVisual const& layer, float2 pos) override;
             void Tick(SceneContext const& ctx, wuc::ContainerVisual const& layer, bool jump) override;
+            bool HostsAgents() const override { return true; }
+            void UpdateSessions(SessionsSnapshot const& snapshot) override
+            {
+                m_sessions = snapshot;
+                if (m_animals) m_animals->Update(snapshot);
+            }
+            std::optional<std::wstring> HitAgent(float2 pos) const override { return m_animals ? m_animals->Hit(pos) : std::nullopt; }
+            void HoverAgent(std::optional<float2> pos) override { if (m_animals) m_animals->Hover(pos); }
+            int ActivateAgent(std::wstring const& id) override { return m_animals ? m_animals->Activate(id) : 0; }
+            void Release() override { m_animals.reset(); }
 
         private:
             using ColorFn = std::function<Color(Look const&)>;
@@ -520,8 +531,8 @@ namespace ld
             void PlaceLuminaries(Sun const& sun, float seconds);
 
             void BuildSky(SceneContext const& ctx, wuc::ContainerVisual const& layer, RECT const& rc);
-            void BuildHills(SceneContext const& ctx, wuc::ContainerVisual const& layer, RECT const& rc, Ridge& ground);
-            void BuildGrass(SceneContext const& ctx, wuc::ContainerVisual const& layer, RECT const& rc, Ridge const& ground);
+            void BuildHills(SceneContext const& ctx, wuc::ContainerVisual const& layer, RECT const& rc, Ridge& ground, MeadowStage* stage);
+            void BuildGrass(SceneContext const& ctx, wuc::ContainerVisual const& layer, RECT const& rc, Ridge const& ground, MeadowStage* stage);
             void BuildCreatures(SceneContext const& ctx, wuc::ContainerVisual const& layer, RECT const& rc, Ridge const& ground);
             void SpawnShootingStar(Sky const& sky);
 
@@ -542,6 +553,8 @@ namespace ld
             float m_sunProgress = -1.0f;
             wuc::CompositionBrush m_seedBrush{ nullptr };
             wuc::CompositionBrush m_starTrail{ nullptr };
+            std::shared_ptr<MeadowAnimals> m_animals;
+            std::optional<SessionsSnapshot> m_sessions;
         };
 
         // ------------------------------------------------------------ bindings
@@ -769,7 +782,7 @@ namespace ld
 
         // ------------------------------------------------------------ build: hills and mist
 
-        void MeadowEffect::BuildHills(SceneContext const& ctx, wuc::ContainerVisual const& root, RECT const& rc, Ridge& ground)
+        void MeadowEffect::BuildHills(SceneContext const& ctx, wuc::ContainerVisual const& root, RECT const& rc, Ridge& ground, MeadowStage* stage)
         {
             float W = static_cast<float>(rc.right - rc.left), H = static_cast<float>(rc.bottom - rc.top);
             float cx = (rc.left + rc.right) * 0.5f;
@@ -850,6 +863,17 @@ namespace ld
             mist(distant.base + H * 0.015f, H * 0.10f, 0.55f, 0.006f, 23.0f);
             hill(mid, MidTop, MidBottom, 0.009f, 0.33f);
             mist(mid.base + H * 0.03f, H * 0.08f, 0.38f, 0.014f, 31.0f);
+            if (stage)
+            {
+                // Working animals live on the mid hill: same parallax, behind the ground hill.
+                stage->back = m_c.CreateContainerVisual();
+                stage->back.Size(float2(W, H));
+                parallax(stage->back, 0, 0, 0.009f);
+                stage->parallax[0] = 0.009f;
+                root.Children().InsertAtTop(stage->back);
+                stage->backY = [mid](float x) { return mid.At(x); };
+                stage->groundY = [g = ground](float x) { return g.At(x); };
+            }
             hill(ground, NearTop, NearBottom, 0.020f, 0.5f);
         }
 
@@ -862,7 +886,7 @@ namespace ld
         int TuftTexture(int row, int variant) { return row * kTuftVariants + variant; }
         int FlowerTexture(int row, int kind, int variant) { return 4 * kTuftVariants + (row - 2) * FlowerKinds * 2 + kind * 2 + variant; }
 
-        void MeadowEffect::BuildGrass(SceneContext const& ctx, wuc::ContainerVisual const& root, RECT const& rc, Ridge const& ground)
+        void MeadowEffect::BuildGrass(SceneContext const& ctx, wuc::ContainerVisual const& root, RECT const& rc, Ridge const& ground, MeadowStage* stage)
         {
             float W = static_cast<float>(rc.right - rc.left), H = static_cast<float>(rc.bottom - rc.top);
             float cx = (rc.left + rc.right) * 0.5f;
@@ -909,6 +933,22 @@ namespace ld
                 parallax.SetScalarParameter(L"k", spec.parallax);
                 row.StartAnimation(L"Offset", parallax);
                 root.Children().InsertAtTop(row);
+                if (stage && r < 3)
+                {
+                    // Animal layers sit between the grass rows so the blades in front of them overlap them.
+                    constexpr float kAnimalParallax[3] = { 0.022f, 0.026f, 0.030f };
+                    auto animals = m_c.CreateContainerVisual();
+                    animals.Size(float2(W, H));
+                    auto p = m_c.CreateExpressionAnimation(L"Vector3((cx - pointer.Position.X) * k * pointer.Strength, 0.0, 0.0)");
+                    p.SetReferenceParameter(L"pointer", ctx.pointer);
+                    p.SetScalarParameter(L"cx", cx);
+                    p.SetScalarParameter(L"k", kAnimalParallax[r]);
+                    animals.StartAnimation(L"Offset", p);
+                    stage->parallax[r + 1] = kAnimalParallax[r];
+                    (r == 0 ? stage->rest : r == 1 ? stage->mid : stage->front) = animals;
+                    // root order: row0, rest, row1, mid, row2, front, row3.
+                    root.Children().InsertAtTop(animals);
+                }
 
                 float margin = spec.parallax * W * 0.6f + spec.w * H;
                 auto baseAt = [&](float x) { return ground.At(x) + (H * 1.012f - ground.At(x)) * spec.t + H * 0.004f; };
@@ -1004,11 +1044,25 @@ namespace ld
 
         // ------------------------------------------------------------ build
 
+        MeadowLight LightFor(Look const& look)
+        {
+            MeadowLight l;
+            l.night = std::clamp(look.level[Stars], 0.0f, 1.0f);
+            l.bright = 1.0f - 0.52f * l.night;
+            l.tint = look.color[SkyUpper];
+            l.tintAmount = 0.10f + 0.38f * l.night;
+            l.warm = look.color[SunGlow];
+            l.warmth = look.level[HorizonAlpha] * 0.35f * (1.0f - l.night);
+            l.haze = look.color[Mist];
+            return l;
+        }
+
         void MeadowEffect::Build(SceneContext const& ctx, wuc::ContainerVisual const& layer)
         {
             m_c = ctx.compositor;
             m_graphics = ctx.graphics;
             m_rng = Rng(0x6D656164); // stable landscape across rebuilds
+            m_animals.reset();
             m_colors.clear();
             m_opacities.clear();
             m_textures.clear();
@@ -1066,18 +1120,41 @@ namespace ld
                         }
             }
 
-            for (auto const& rc : ctx.monitors)
+            // The animals live on the primary monitor (the one containing screen 0,0).
+            int vx = GetSystemMetrics(SM_XVIRTUALSCREEN), vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            size_t primary = 0;
+            for (size_t i = 0; i < ctx.monitors.size(); ++i)
+                if (ctx.monitors[i].left + vx <= 0 && ctx.monitors[i].right + vx > 0 && ctx.monitors[i].top + vy <= 0 && ctx.monitors[i].bottom + vy > 0)
+                    primary = i;
+
+            for (size_t i = 0; i < ctx.monitors.size(); ++i)
             {
+                RECT const& rc = ctx.monitors[i];
                 auto root = m_c.CreateContainerVisual();
                 root.Offset(float3(static_cast<float>(rc.left), static_cast<float>(rc.top), 0));
                 root.Size(float2(static_cast<float>(rc.right - rc.left), static_cast<float>(rc.bottom - rc.top)));
                 root.Clip(m_c.CreateInsetClip());
                 layer.Children().InsertAtTop(root);
                 BuildSky(ctx, root, rc);
+                MeadowStage stage;
+                MeadowStage* st = i == primary && !m_textures.empty() ? &stage : nullptr;
                 Ridge ground;
-                BuildHills(ctx, root, rc, ground);
-                if (!m_textures.empty()) BuildGrass(ctx, root, rc, ground);
+                BuildHills(ctx, root, rc, ground, st);
+                if (!m_textures.empty()) BuildGrass(ctx, root, rc, ground, st);
                 BuildCreatures(ctx, root, rc, ground);
+                if (st && stage.front)
+                {
+                    stage.rc = rc;
+                    RECT screen = rc;
+                    OffsetRect(&screen, vx, vy);
+                    MONITORINFO mi{ sizeof(mi) };
+                    if (GetMonitorInfoW(MonitorFromRect(&screen, MONITOR_DEFAULTTOPRIMARY), &mi))
+                        stage.visibleBottom = static_cast<float>(mi.rcWork.bottom - mi.rcMonitor.top);
+                    stage.top = m_c.CreateContainerVisual();
+                    stage.top.Size(root.Size());
+                    root.Children().InsertAtTop(stage.top);
+                    m_animals = std::make_shared<MeadowAnimals>(ctx, std::move(stage), m_wind, LightFor(m_look));
+                }
             }
 
             m_fx = m_c.CreateContainerVisual();
@@ -1117,7 +1194,11 @@ namespace ld
             if (LookDistance(look, m_drawn, Grass0Base, Grass3Tip) > 3.0f || Diff(look.color[SkyUpper], m_drawn.color[SkyUpper]) > 6.0f ||
                 std::abs(look.level[FlowerLight] - m_drawn.level[FlowerLight]) > 0.03f)
                 DrawTextures(look);
-
+            if (m_animals)
+            {
+                m_animals->SetLight(LightFor(look), seconds);
+                m_animals->Tick();
+            }
             float width = static_cast<float>(m_skies.front().rc.right - m_skies.front().rc.left);
             if (flip || std::abs(sun.progress - m_sunProgress) * width > 2.0f)
             {

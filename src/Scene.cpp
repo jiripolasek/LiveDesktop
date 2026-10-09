@@ -106,9 +106,34 @@ namespace ld
 
     void Scene::SetEffect(size_t index)
     {
+        if (!m_effects.empty()) m_effects[m_current]->Release();
         m_current = index % m_effects.size();
         Log(L"Effect -> %s", CurrentEffectName());
         Rebuild(true);
+        if (OnEffectChanged) OnEffectChanged();
+    }
+
+    void Scene::UpdateSessions(SessionsSnapshot const& snapshot)
+    {
+        m_sessions = snapshot;
+        if (m_layer && !m_effects.empty()) m_effects[m_current]->UpdateSessions(snapshot);
+    }
+
+    std::optional<std::wstring> Scene::HitAgent(float2 pos) const
+    {
+        if (!m_layer || m_paused || m_effects.empty()) return std::nullopt;
+        return m_effects[m_current]->HitAgent(pos);
+    }
+
+    void Scene::HoverAgent(std::optional<float2> pos)
+    {
+        if (m_layer && !m_effects.empty()) m_effects[m_current]->HoverAgent(pos);
+    }
+
+    int Scene::ActivateAgent(std::wstring const& id)
+    {
+        if (!m_layer || m_effects.empty()) return 0;
+        return m_effects[m_current]->ActivateAgent(id);
     }
 
     const wchar_t* Scene::CurrentEffectName() const
@@ -124,6 +149,7 @@ namespace ld
         auto layer = c.CreateContainerVisual();
         layer.Size(m_ctx.size);
         m_effects[m_current]->Build(m_ctx, layer);
+        if (m_sessions) m_effects[m_current]->UpdateSessions(*m_sessions);
 
         auto old = m_layer;
         m_layer = layer;
@@ -204,6 +230,7 @@ namespace ld
     void Scene::Shutdown()
     {
         DetachFromWindow();
+        for (auto& effect : m_effects) effect->Release();
         if (m_layer)
         {
             CloseTree(m_layer);

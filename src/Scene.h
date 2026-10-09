@@ -1,5 +1,6 @@
 #pragma once
 #include "pch.h"
+#include "Model.h"
 
 namespace ld
 {
@@ -31,6 +32,14 @@ namespace ld
         virtual void OnClick(SceneContext const& ctx, wuc::ContainerVisual const& layer, float2 pos) = 0;
         // Slow periodic update (every few seconds, not per frame). `jump` = the clock was overridden.
         virtual void Tick(SceneContext const&, wuc::ContainerVisual const&, bool /*jump*/) {}
+        // Effects that render the Copilot agents themselves (instead of the ambient orbs).
+        virtual bool HostsAgents() const { return false; }
+        virtual void UpdateSessions(SessionsSnapshot const&) {}
+        virtual std::optional<std::wstring> HitAgent(float2) const { return std::nullopt; }
+        virtual void HoverAgent(std::optional<float2>) {}
+        virtual int ActivateAgent(std::wstring const&) { return 0; } // ms to wait before opening
+        // The effect is being switched away from: drop timers/state that reference its visuals.
+        virtual void Release() {}
     };
 
     std::vector<std::unique_ptr<Effect>> CreateEffects();
@@ -66,8 +75,18 @@ namespace ld
         wuc::ContainerVisual Overlay() const { return m_overlay; }
         // The wallpaper effect container (used to tint/dim the whole effect, e.g. focus scene).
         wuc::ContainerVisual EffectRoot() const { return m_effectRoot; }
+        wuc::ContainerVisual Root() const { return m_root; }
         winrt::Windows::System::DispatcherQueue Queue() const { return m_dispatcher ? m_dispatcher.DispatcherQueue() : nullptr; }
         std::function<void(float2)> OnResized;
+        // Raised after the effect changed (e.g. to hide/show the ambient orbs).
+        std::function<void()> OnEffectChanged;
+
+        // Copilot agents rendered by the wallpaper effect itself (Meadow animals).
+        bool HostsAgents() const { return !m_effects.empty() && m_effects[m_current]->HostsAgents(); }
+        void UpdateSessions(SessionsSnapshot const& snapshot);
+        std::optional<std::wstring> HitAgent(float2 pos) const;
+        void HoverAgent(std::optional<float2> pos);
+        int ActivateAgent(std::wstring const& id);
 
     private:
         void Rebuild(bool crossfade);
@@ -83,6 +102,7 @@ namespace ld
         wuc::ScalarKeyFrameAnimation m_strengthAnimation{ nullptr };
         std::vector<std::unique_ptr<Effect>> m_effects;
         size_t m_current = 0;
+        std::optional<SessionsSnapshot> m_sessions;
         bool m_pointerOver = false;
         bool m_paused = false;
     };

@@ -7,7 +7,7 @@ the input path.
 
 | Effect | What it does |
 | --- | --- |
-| **Meadow** (default) | A living landscape that follows the **real time of day**: layered hills with atmospheric haze, a sky that moves through night, blue hour, sunrise, day and golden hour, drifting clouds, stars and the odd shooting star. Hundreds of grass tufts and wildflowers sway in **traveling gusts of wind**. The cursor brushes through the grass, fireflies come out at night, and a click on empty desktop space sends a gust ring and releases dandelion seeds. |
+| **Meadow** (default) | A living landscape that follows the **real time of day**: layered hills with atmospheric haze, a sky that moves through night, blue hour, sunrise, day and golden hour, drifting clouds, stars and the odd shooting star. Hundreds of grass tufts and wildflowers sway in **traveling gusts of wind**. The cursor brushes through the grass, fireflies come out at night, and a click on empty desktop space sends a gust ring and releases dandelion seeds. Your **Copilot agents live here as animals** (see [Meadow animals](#meadow-animals)). |
 | **Aurora** | Rotating gradient sky, waving aurora curtains, and soft orbs that drift and **move away from the cursor**. Clicking empty desktop space sends out ripples. |
 | **Fireflies** | Night sky with nebula glows and hundreds of twinkling sparks that **gather toward the cursor**. Clicking empty desktop space gives a spark burst and a ripple. |
 | **Ember** | The Aurora scene with a warm palette. |
@@ -78,6 +78,13 @@ build\LiveDesktop.exe --exit-after 30 :: auto-exit after 30 s (testing)
   `hit:<x>,<y>` (logs what a click at that screen point would do, without clicking).
   - Meadow: `time:<dawn|sunrise|morning|day|afternoon|golden|sunset|dusk|night|HH:MM|auto>` pins
     the light to a time of day (`auto` follows the clock).
+  - Agents: `agent:list` logs the sessions with their 1-based numbers (sorted by id).
+    `agent:<n|id-prefix>:<working|waiting|done|idle>` forces a session's state, for example
+    `--send agent:2:waiting`. `agent:<n>:auto` or `agent:auto` drops the override(s).
+  - Rendering: `render:on` keeps animations running even while the desktop is covered (`render:auto`
+    restores normal pausing). `snapshot:<path.png>` renders the scene offscreen to a PNG through
+    `GraphicsCaptureItem::CreateFromVisual`. This works when windows cover the desktop or the
+    workstation is locked. Desktop icons aren't part of the snapshot.
   - Clipboard shelf: `stack:<open|close|auto>` (fan out / collapse), `stack:<drop|nodrop>` (preview
     the drop target), `stack:<on|off>`, and `clip:<text>` (push text onto the shelf and clipboard).
 - **Ctrl+C**, the tray **Exit** item, or `WM_CLOSE` all exit cleanly. LiveDesktop removes its window
@@ -286,6 +293,50 @@ All three effects are intentionally very subtle.
 **Next-meeting horizon** (`CalendarProvider.cpp`): a thin line of light with *"Design sync in 12
 min"* near the bottom. It brightens as the meeting approaches.
 
+### Meadow animals
+
+In the **Meadow** effect the agent orbs are replaced by animals; the other effects keep the orbs.
+Each Copilot session becomes a small creature that lives in the landscape and acts out its status,
+from the same session signals described above.
+
+| Working: busy on the back hills | Waiting: comes to the front and asks |
+| --- | --- |
+| ![Working animals on the back hills](docs/screenshots/meadow-animals-working.jpg) | ![A waiting sheep with its speech bubble](docs/screenshots/meadow-animals-waiting.jpg) |
+| **Finished: jump, spin and petals** | **Night: silhouettes, eye glints, fireflies** |
+| ![A sheep celebrating](docs/screenshots/meadow-animals-celebrate.jpg) | ![The meadow animals at night](docs/screenshots/meadow-animals-night.jpg) |
+
+| Status | Behaviour |
+| --- | --- |
+| **working** | Lives far away on the back hills: small, with atmospheric haze applied. It runs a "busy" loop: grazing, digging, carrying things, hopping, nibbling. |
+| **waiting** (question / plan approval) | Walks or hops down the hills to the **front**, growing with depth as it comes. There it bounces and waves under a "!" speech bubble with the session name and the ask, e.g. *"Needs your input · 2m"*. It escalates gently, never strobing: bigger hops after 2 min, peeking out of the grass edge after 8 min. |
+| **done** | A one-shot celebration (jump + spin + sparkles and petals). Then it wanders to a resting spot mid-ground and lies down. After 10 min it sleeps, with a drifting "zZ". |
+| **idle** | Sleeps mid-ground; dropped after `maxIdleHours`, like the orbs. |
+
+- **Terrain-following walks.** State changes are animated journeys along the hill silhouettes (Offset,
+  Scale and haze key frames sampled from the terrain), never teleports. Animals hop between depth
+  layers inserted *between* the hill and grass layers. A foreground animal is partly hidden by the
+  front grass blades, and a back-hill animal stands on the far ridge.
+- **Species.** Bunny, fox, sheep, deer, hedgehog, duck, cat and snail, in 3 colour variants each. The
+  species and variant come from a hash of the session id, so an agent keeps its animal across
+  restarts. Up to 10 animals are shown; active ones take priority.
+- **Art and rig.** Every species is a multi-part rig (body, head, ears, legs, tail, eyelids, eye glint,
+  a carried item). Each part is drawn once with Direct2D geometry into a `CompositionDrawingSurface`.
+  Idle bob, walk cycle, hop, wave, blink and sleep are composition key-frame and expression
+  animations driven by a per-animal property set, so the CPU stays idle while they move.
+- **Light.** Animals are tinted with the sky colour and get darker toward night, where they read as
+  silhouettes. Their eyes catch a little light at night. Back-hill animals fade into the haze, and
+  each animal has a soft contact shadow that fades while it's in the air.
+- **Wind and cursor.** Gusts from the meadow's wind field make ears flutter. Hovering an animal makes
+  it look at the cursor and shows a name tag.
+- **Click to open.** Clicking an animal opens its session (`ghapp://sessions/<id>`). This uses the same
+  click-through rules as the dashboard cards: the hook only observes the click, never swallows it, and
+  a click on a desktop icon is left alone. A waiting animal does a short happy hop before the session
+  opens.
+
+The Meadow-animal screenshots were rendered offscreen with `--send snapshot:<path>`, because the
+desktop was covered during the run. They show the wallpaper layer only, with no icons, and were taken
+with `--mock` plus `--send agent:<n>:<state>` to pose each state.
+
 ### Concept 2: the productivity reveal (Win+D)
 
 **Detecting "desktop revealed"** (`Reveal.cpp`). Out-of-context `SetWinEventHook` hooks listen for
@@ -421,6 +472,8 @@ Measured on a 12-core machine with one 3440×1440 display, over 20–30 s window
 | --- | --- |
 | Desktop covered by app windows (user actively working) | **0.17% of the machine** (~2% of one core) |
 | Desktop revealed, dashboard visible, animations running | **0.09% of the machine** (~1% of one core) |
+| Meadow with 5 agent animals, rendering forced on (`render:on`) | **0.17% of the machine** (~2% of one core) |
+| Meadow with 5 agent animals, desktop covered (normal pausing) | **0.04% of the machine** |
 | Fully occluded / fullscreen app | animations paused (`GlobalPlaybackRate` minimum), providers throttled |
 
 Working set is about 65 MB. All animations are composition animations that run in DWM. The UI thread
@@ -476,6 +529,9 @@ src/DesktopHost.*       WorkerW / 24H2 discovery, parenting, z-order, bounds
 src/Scene.*             compositor, DesktopWindowTarget, pointer property set, pause, effect switching
 src/Effects.cpp         Aurora / Fireflies / Ember wallpaper effects
 src/Meadow.cpp          Meadow: time-of-day landscape, wind-swept grass, flowers, fireflies
+src/MeadowAnimals.*     Meadow animals: behaviour engine (modes, terrain walks, depth layers, hover/click)
+src/MeadowAnimalsArt.*  procedural species rigs (8 species x 3 colour variants) drawn with Direct2D
+src/Snapshot.*          offscreen capture of the scene visual to PNG (Windows.Graphics.Capture + WIC)
 src/Ambient.*           ambient layer: agent orbs, CI tide, fireflies, system pulse, horizon, focus timer
 src/Dashboard.*         glass cards, layout around icons, hit test / hover / click targets
 src/Reveal.*            WinEvent-based "desktop revealed" / "fully occluded" detection
