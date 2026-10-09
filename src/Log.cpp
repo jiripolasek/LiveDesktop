@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "Log.h"
 #include <share.h>
+#include <io.h>
 
 namespace ld
 {
@@ -31,6 +32,9 @@ namespace ld
         g_path = path.wstring();
 
         g_stdout = GetStdHandle(STD_OUTPUT_HANDLE);
+        // A launcher can hand us a stale stdout handle value that now aliases our own log file.
+        if (g_file && g_stdout == reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(g_file)))) g_stdout = nullptr;
+        if (g_stdout && g_stdout != INVALID_HANDLE_VALUE && GetFileType(g_stdout) == FILE_TYPE_UNKNOWN) g_stdout = nullptr;
         DWORD mode = 0;
         g_isConsole = g_stdout && g_stdout != INVALID_HANDLE_VALUE && GetConsoleMode(g_stdout, &mode);
     }
