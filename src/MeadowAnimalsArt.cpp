@@ -786,17 +786,23 @@ namespace ld::animals
                 {
                     // Rottweiler: small triangular ear held close to the skull, folded forward
                     // and down — not the long hanging floppy ear the doodle coats use.
-                    float eL = L * 0.5f, eW = w * 1.2f;
-                    auto ear = p.Smooth({ { -eW * 0.5f, 0.02f }, { -eW * 0.08f, -eL * 0.95f },
-                        { eW * 0.55f, -eL * 0.4f }, { eW * 0.42f, 0.05f } }, true);
-                    p.Fill(ear, p.Vert(-eL, 0.05f, ScaleRgb(c.body, 1.05f), ScaleRgb(c.body, 0.82f)).get());
-                    // Fold-crease outline: against a black skull the ear fill alone is the same
-                    // near-black value and disappears into the head. A crisp dark contour around
-                    // the ear (and a thin highlight along its leading fold) makes it read as its
-                    // own small, separate, folded-down shape instead of one big round head blob.
-                    p.Stroke(ear, p.Solid(ScaleRgb(c.body, 0.42f), 0.85f).get(), 0.012f);
-                    p.Stroke(p.Smooth({ { -eW * 0.42f, -0.01f }, { -eW * 0.1f, -eL * 0.85f } }, false),
-                        p.Solid(MixRgb(c.body, 0xFFFFFF, 0.3f), 0.5f).get(), 0.008f);
+                    //
+                    // A same-color fill with only a hairline stroke proved invisible once
+                    // anti-aliasing/haze/distance blur softened it away (confirmed by rendered
+                    // snapshot inspection) — the ear sat entirely *inside* the skull's own
+                    // silhouette, so there was never a hard, geometry-level edge to read, only a
+                    // subtle value change. Extending the tip so it visibly breaches above the
+                    // skull's own outline creates a real silhouette notch against the sky/grass
+                    // behind it, which survives distance and blur far better than a thin stroke.
+                    float eL = L * 0.78f, eW = w * 1.3f;
+                    auto ear = p.Smooth({ { -eW * 0.5f, 0.03f }, { -eW * 0.1f, -eL * 0.95f },
+                        { eW * 0.58f, -eL * 0.42f }, { eW * 0.44f, 0.06f } }, true);
+                    p.Fill(ear, p.Vert(-eL, 0.06f, ScaleRgb(c.body, 1.1f), ScaleRgb(c.body, 0.78f)).get());
+                    // Bold dark contour + a brighter fold-crease highlight — thick/opaque enough
+                    // to still read once scaled down for a distant, hazier instance.
+                    p.Stroke(ear, p.Solid(ScaleRgb(c.body, 0.3f), 1.0f).get(), 0.022f);
+                    p.Stroke(p.Smooth({ { -eW * 0.4f, 0.0f }, { -eW * 0.08f, -eL * 0.8f } }, false),
+                        p.Solid(MixRgb(c.body, 0xFFFFFF, 0.42f), 0.75f).get(), 0.014f);
                     break;
                 }
                 // Floppy, hanging ear: wider near the head, rounding to a soft tip, shaded toward
@@ -835,12 +841,18 @@ namespace ld::animals
                 break;
             case Dog:
                 if (v == 0)
-                    // Rottweiler: short, stubby docked-looking tail rather than a long sweeping one.
-                    // Offset further out from the tail anchor than a plain small dot would need —
-                    // the Rottweiler's extra-broad/deep body (see DrawBody) otherwise swallows a
-                    // centered stub completely, so it has to clear the enlarged rump to be visible
-                    // as a short tail peeking out at all, rather than reading as no tail.
-                    p.Dot({ -0.085f, -0.01f }, 0.055f, 0.048f, p.Vert(-0.07f, 0.02f, ScaleRgb(c.body, 1.05f), ScaleRgb(c.body, 0.82f)).get());
+                {
+                    // Rottweiler: short, stubby docked-looking tail — a tapered stub, not a long
+                    // sweeping one. A round dot read as a button stuck to the rump rather than a
+                    // tail segment once rendered (confirmed via snapshot), so this is shaped as a
+                    // short wedge: wide where it joins the body (and hidden under it, since Tail
+                    // z-orders behind Body) tapering to a rounded tip that clears the Rottweiler's
+                    // extra-broad rump (see DrawBody) by a comfortable margin.
+                    auto tail = p.Smooth({ { 0.015f, -0.05f }, { -0.07f, -0.065f }, { -0.14f, -0.03f },
+                        { -0.15f, 0.015f }, { -0.1f, 0.04f }, { -0.015f, 0.028f } }, true);
+                    p.Fill(tail, p.Vert(-0.065f, 0.04f, ScaleRgb(c.body, 1.08f), ScaleRgb(c.body, 0.8f)).get());
+                    p.Stroke(tail, p.Solid(ScaleRgb(c.body, 0.3f), 0.9f).get(), 0.016f);
+                }
                 else
                     p.Stroke(p.Smooth({ { 0.02f, 0.0f }, { -0.1f, -0.08f }, { -0.16f, -0.2f }, { -0.1f, -0.32f }, { -0.01f, -0.36f } }, false),
                         p.Solid(c.body).get(), 0.065f);
