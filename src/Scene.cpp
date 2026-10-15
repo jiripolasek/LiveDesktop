@@ -52,14 +52,6 @@ namespace ld
         m_ctx.pointer.InsertScalar(L"Radius", 400.0f);
 
         auto easeOut = m_ctx.compositor.CreateCubicBezierEasingFunction(float2(0.1f, 0.6f), float2(0.3f, 1.0f));
-        auto followEase = m_ctx.compositor.CreateCubicBezierEasingFunction(float2(0.15f, 0.9f), float2(0.3f, 1.0f));
-        m_followAnimation = m_ctx.compositor.CreateVector3KeyFrameAnimation();
-        m_followAnimation.InsertExpressionKeyFrame(0.0f, L"this.StartingValue");
-        m_followAnimation.InsertExpressionKeyFrame(1.0f, L"target", followEase);
-        // Short: this animation restarts on every mouse-move message (one coalesced per frame), so
-        // its duration is effectively how far behind the cursor the grass-bend/firefly reaction
-        // trails. 260ms read as laggy; this keeps a touch of smoothing without a visible delay.
-        m_followAnimation.Duration(90ms);
 
         m_strengthAnimation = m_ctx.compositor.CreateScalarKeyFrameAnimation();
         m_strengthAnimation.InsertExpressionKeyFrame(0.0f, L"this.StartingValue");
@@ -152,17 +144,13 @@ namespace ld
         if (!m_ctx.pointer) return;
         if (overDesktop)
         {
-            if (!m_pointerOver)
-            {
-                // Re-entering: jump to the new position instead of sweeping across the screen.
-                m_ctx.pointer.StopAnimation(L"Position");
-                m_ctx.pointer.InsertVector3(L"Position", float3(pos.x, pos.y, 0.0f));
-            }
-            else
-            {
-                m_followAnimation.SetVector3Parameter(L"target", float3(pos.x, pos.y, 0.0f));
-                m_ctx.pointer.StartAnimation(L"Position", m_followAnimation);
-            }
+            // Grass bend, firefly attraction, and pollen repulsion all read Position directly from
+            // DWM expression animations every frame, so it should track the raw cursor with no added
+            // latency - any easing here reads as the whole effect lagging behind the mouse. The
+            // Strength ramp below is what actually gives entering/leaving its gentle fade; Position
+            // itself just needs to be current.
+            m_ctx.pointer.StopAnimation(L"Position");
+            m_ctx.pointer.InsertVector3(L"Position", float3(pos.x, pos.y, 0.0f));
         }
         if (overDesktop != m_pointerOver)
         {
@@ -206,7 +194,6 @@ namespace ld
             m_layer = nullptr;
         }
         m_effect.reset();
-        m_followAnimation = nullptr;
         m_strengthAnimation = nullptr;
         if (m_overlay) { CloseTree(m_overlay); m_overlay = nullptr; }
         if (m_effectRoot) { m_effectRoot.Close(); m_effectRoot = nullptr; }

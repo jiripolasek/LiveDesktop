@@ -43,7 +43,7 @@ namespace ld::animals
 
     const wchar_t* SpeciesName(int species)
     {
-        static const wchar_t* names[] = { L"bunny", L"fox", L"sheep", L"deer", L"hedgehog", L"duck", L"cat", L"snail" };
+        static const wchar_t* names[] = { L"bunny", L"fox", L"sheep", L"deer", L"hedgehog", L"duck", L"cat", L"snail", L"dog" };
         return species >= 0 && species < SpeciesCount ? names[species] : L"?";
     }
 
@@ -147,6 +147,20 @@ namespace ld::animals
                 r.eyeR = 0; r.mouth = { 0.1f, 0.0f };
                 r.graze = 0.3f; r.gait = 1.6f; r.speed = 0.6f; r.bob = 0; r.legAmp = 0; r.stretch = true;
             }
+            {
+                Rig& r = rigs[Dog];
+                r.height = 0.86f; r.rx = 0.34f; r.body = { 0, -0.36f }; r.bx = 0.31f; r.by = 0.17f;
+                r.legX[0] = -0.21f; r.legX[1] = 0.18f; r.legX[2] = -0.16f; r.legX[3] = 0.22f;
+                r.legLen = 0.27f; r.legW = 0.08f; r.foot = 0.045f;
+                r.neck = { 0.26f, -0.43f };
+                // Floppy, hanging ears (shared rig across the Rottweiler/Golden Doodle/White Doodle
+                // coat variants) rather than the pointy Fox/Cat ear shape.
+                r.ear[0] = { -0.02f, -0.1f }; r.ear[1] = { 0.06f, -0.11f }; r.earLen = 0.19f; r.earW = 0.1f;
+                r.earBase = -0.15f; r.earFlutter = 0.08f; r.earDroop = -0.65f;
+                r.tailAt = { -0.29f, -0.4f };
+                r.eye = { 0.13f, -0.07f }; r.eyeR = 0.03f; r.mouth = { 0.26f, 0.02f };
+                r.graze = 0.65f; r.gait = 0.6f; r.speed = 2.4f; r.bob = 0.05f; r.legAmp = 0.5f;
+            }
             return rigs;
         }
     }
@@ -246,6 +260,16 @@ namespace ld::animals
                 const uint32_t body[] = { 0xE9A158, 0x8E909A, 0x3E3B3B, 0xF1E3CC };
                 const uint32_t stripe[] = { 0xC97E3C, 0x6C6E78, 0x2C2A2A, 0xD8A266 };
                 return { body[v], 0xFAF5EE, 0x1E1A18, 0xE8999C, stripe[v], body[v], v == 2 ? 0xE2C552u : 0x8DB24Cu };
+            }
+            case Dog:
+            {
+                // 0 Rottweiler (black/tan), 1 Golden Doodle (golden curly), 2 White Doodle (white
+                // curly), 3 a bonus chocolate-lab coat rounding out the 4-slot variant palette.
+                const uint32_t body[] = { 0x1E1A18, 0xE8C27A, 0xF5F1E8, 0x6B4226 };
+                const uint32_t belly[] = { 0xB8763A, 0xF6E4B8, 0xFFFFFF, 0x8A5A36 };
+                const uint32_t dark[] = { 0x120F0E, 0x8A6534, 0x3A3430, 0x3A2414 };
+                const uint32_t mark[] = { 0x8A5A2A, 0xD9A94F, 0xE3DCC9, 0x5A3A20 };
+                return { body[v], belly[v], dark[v], 0x3A2420, mark[v], body[v], v == 0 || v == 3 ? 0x2A1A10u : 0x5E4028u };
             }
             default:
             {
@@ -403,6 +427,7 @@ namespace ld::animals
             case Hedgehog: top = bottom = foot = ScaleRgb(c.belly, 0.78f); break;
             case Duck: top = bottom = foot = c.accent; break;
             case Cat: if (v >= 2) foot = c.belly; break;
+            case Dog: foot = c.belly; if (v == 0) bottom = c.extra; break;
             }
             if (sp == Duck)
             {
@@ -524,6 +549,22 @@ namespace ld::animals
                 if (v >= 1) p.Fill(p.Intersect(main.get(), p.Ell({ b.x + 0.18f, b.y + 0.08f }, 0.14f, 0.09f).get()), p.Solid(c.belly).get());
                 break;
             }
+            case Dog:
+            {
+                auto main = p.Ell(b, r.bx, r.by);
+                p.Volume(main, b.y - r.by, b.y + r.by, c.body);
+                // Chest/belly patch: the Rottweiler's tan bib, or a lighter undercoat on the others.
+                p.Fill(p.Intersect(main.get(), p.Ell({ b.x + 0.2f, b.y + 0.1f }, 0.16f, 0.1f).get()), p.Solid(c.belly, v == 0 ? 1.0f : 0.85f).get());
+                if (v == 1 || v == 2)
+                {
+                    // Curly-coat texture: a scatter of little loop strokes over the body for the doodles.
+                    auto curl = p.Solid(c.extra, 0.6f);
+                    const float2 curls[] = { { -0.16f, -0.08f }, { -0.04f, -0.14f }, { 0.08f, -0.1f }, { -0.1f, 0.02f }, { 0.04f, 0.04f }, { 0.16f, -0.02f } };
+                    for (auto const& at : curls)
+                        p.Stroke(p.Smooth({ { b.x + at.x - 0.028f, b.y + at.y }, { b.x + at.x, b.y + at.y - 0.03f }, { b.x + at.x + 0.028f, b.y + at.y } }, false), curl.get(), 0.02f);
+                }
+                break;
+            }
             default: // snail
             {
                 auto foot = p.Smooth({ { -0.37f, -0.01f }, { -0.1f, 0.0f }, { 0.18f, 0.0f }, { 0.34f, -0.02f }, { 0.36f, -0.08f },
@@ -640,6 +681,31 @@ namespace ld::animals
                 p.Blush({ 0.12f, -0.01f }, 0.03f, c.accent, 0.3f);
                 break;
             }
+            case Dog:
+            {
+                auto skull = p.Ell({ 0.04f, -0.09f }, 0.15f, 0.13f);
+                auto snout = p.Smooth({ { 0.08f, -0.12f }, { 0.2f, -0.07f }, { 0.29f, -0.01f }, { 0.2f, 0.06f }, { 0.06f, 0.065f } }, true);
+                p.Volume(skull, -0.21f, 0.07f, c.body);
+                p.Fill(snout, p.Vert(-0.1f, 0.065f, MixRgb(c.belly, 0xFFFFFF, 0.08f), ScaleRgb(c.belly, 0.95f)).get());
+                p.Dot({ 0.285f, -0.015f }, 0.026f, 0.021f, p.Solid(c.dark).get());
+                p.Eye(r.eye, r.eyeR, c.iris, false);
+                if (v == 0 || v == 3)
+                {
+                    // Rottweiler/chocolate-lab tan eyebrow dots above the eyes.
+                    auto brow = p.Solid(c.belly);
+                    p.Dot({ 0.06f, -0.145f }, 0.018f, 0.014f, brow.get());
+                    p.Dot({ 0.17f, -0.14f }, 0.018f, 0.014f, brow.get());
+                }
+                else
+                {
+                    // Doodle curly cheek fluff.
+                    auto curl = p.Solid(c.extra, 0.6f);
+                    for (auto at : { float2(-0.06f, -0.1f), float2(-0.02f, -0.16f), float2(0.02f, -0.19f) })
+                        p.Dot({ at.x, at.y }, 0.026f, 0.026f, curl.get());
+                }
+                p.Blush({ 0.14f, 0.02f }, 0.028f, c.accent, 0.3f);
+                break;
+            }
             default: // snail
             {
                 auto head = p.Ell({ 0.04f, -0.035f }, 0.085f, 0.07f);
@@ -683,6 +749,16 @@ namespace ld::animals
                 p.Stroke(p.Smooth({ { 0, 0.0f }, { 0.01f, -L * 0.5f }, { 0, -L } }, false), p.Solid(c.body).get(), 0.03f);
                 p.Eye({ 0, -L }, 0.034f, c.iris, false);
                 break;
+            case Dog:
+            {
+                // Floppy, hanging ear: wider near the head, rounding to a soft tip, shaded toward
+                // the tip since it hangs in its own shadow.
+                auto ear = p.Smooth({ { -w * 0.55f, 0.0f }, { -w * 0.65f, -L * 0.45f }, { -w * 0.2f, -L * 0.85f },
+                    { w * 0.15f, -L * 0.7f }, { w * 0.5f, -L * 0.25f }, { w * 0.35f, 0.02f } }, true);
+                p.Fill(ear, p.Vert(-L, 0.02f, ScaleRgb(c.body, 0.95f), ScaleRgb(c.body, 0.76f)).get());
+                p.Fill(p.Intersect(ear.get(), p.Ell({ -w * 0.1f, -L * 0.45f }, w * 0.35f, L * 0.3f).get()), p.Solid(c.belly, 0.4f).get());
+                break;
+            }
             }
         }
 
@@ -708,6 +784,10 @@ namespace ld::animals
             case Cat:
                 p.Stroke(p.Smooth({ { 0.02f, 0.0f }, { -0.08f, -0.1f }, { -0.1f, -0.25f }, { -0.04f, -0.37f }, { 0.03f, -0.39f } }, false),
                     p.Solid(ScaleRgb(c.body, 0.95f)).get(), 0.06f);
+                break;
+            case Dog:
+                p.Stroke(p.Smooth({ { 0.02f, 0.0f }, { -0.1f, -0.08f }, { -0.16f, -0.2f }, { -0.1f, -0.32f }, { -0.01f, -0.36f } }, false),
+                    p.Solid(c.body).get(), 0.065f);
                 break;
             }
         }
@@ -743,6 +823,16 @@ namespace ld::animals
                 p.Dot({ 0, 0.01f }, 0.034f, 0.044f, p.Solid(0xB0743A).get());
                 p.Dot({ 0, -0.026f }, 0.04f, 0.022f, p.Solid(0x7A5532).get());
                 break;
+            case Dog:
+            {
+                auto bone = p.Solid(0xEDE3CC);
+                p.Capsule(-0.09f, -0.016f, 0.09f, 0.016f, 0.016f, bone.get());
+                p.Dot({ -0.09f, -0.025f }, 0.022f, 0.022f, bone.get());
+                p.Dot({ -0.09f, 0.025f }, 0.022f, 0.022f, bone.get());
+                p.Dot({ 0.09f, -0.025f }, 0.022f, 0.022f, bone.get());
+                p.Dot({ 0.09f, 0.025f }, 0.022f, 0.022f, bone.get());
+                break;
+            }
             default:
                 p.Fill(p.Smooth({ { -0.07f, 0.0f }, { 0.0f, -0.035f }, { 0.07f, 0.0f }, { 0.0f, 0.035f } }, true), p.Solid(0x78B04E).get());
                 p.Stroke(p.Smooth({ { -0.06f, 0.0f }, { 0.06f, 0.0f } }, false), p.Solid(0x4E8A34).get(), 0.008f);

@@ -92,7 +92,6 @@ namespace ld
         wuc::ContainerVisual m_overlay{ nullptr };
         wuc::ContainerVisual m_layer{ nullptr };
         wuc::Desktop::DesktopWindowTarget m_target{ nullptr };
-        wuc::Vector3KeyFrameAnimation m_followAnimation{ nullptr };
         wuc::ScalarKeyFrameAnimation m_strengthAnimation{ nullptr };
         std::unique_ptr<Effect> m_effect;
         std::optional<SessionsSnapshot> m_sessions;
