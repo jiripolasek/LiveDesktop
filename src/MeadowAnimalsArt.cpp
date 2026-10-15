@@ -551,10 +551,13 @@ namespace ld::animals
             }
             case Dog:
             {
-                auto main = p.Ell(b, r.bx, r.by);
-                p.Volume(main, b.y - r.by, b.y + r.by, c.body);
+                // The Rottweiler is stockier/more muscular than the shared Dog rig's default
+                // lean build — broaden and deepen the chest/body ellipse for just that variant.
+                float bx = v == 0 ? r.bx * 1.16f : r.bx, by = v == 0 ? r.by * 1.12f : r.by;
+                auto main = p.Ell(b, bx, by);
+                p.Volume(main, b.y - by, b.y + by, c.body);
                 // Chest/belly patch: the Rottweiler's tan bib, or a lighter undercoat on the others.
-                p.Fill(p.Intersect(main.get(), p.Ell({ b.x + 0.2f, b.y + 0.1f }, 0.16f, 0.1f).get()), p.Solid(c.belly, v == 0 ? 1.0f : 0.85f).get());
+                p.Fill(p.Intersect(main.get(), p.Ell({ b.x + 0.2f, b.y + 0.1f }, v == 0 ? 0.18f : 0.16f, v == 0 ? 0.115f : 0.1f).get()), p.Solid(c.belly, v == 0 ? 1.0f : 0.85f).get());
                 if (v == 1 || v == 2)
                 {
                     // Curly-coat texture: a scatter of little loop strokes over the body for the doodles.
@@ -745,7 +748,7 @@ namespace ld::animals
             }
         }
 
-        void DrawEar(Pen& p, int sp, Pal const& c, Rig const& r)
+        void DrawEar(Pen& p, int sp, int v, Pal const& c, Rig const& r)
         {
             float L = r.earLen, w = r.earW;
             switch (sp)
@@ -779,6 +782,16 @@ namespace ld::animals
                 break;
             case Dog:
             {
+                if (v == 0)
+                {
+                    // Rottweiler: small triangular ear held close to the skull, folded forward
+                    // and down — not the long hanging floppy ear the doodle coats use.
+                    float eL = L * 0.5f, eW = w * 1.2f;
+                    auto ear = p.Smooth({ { -eW * 0.5f, 0.02f }, { -eW * 0.08f, -eL * 0.95f },
+                        { eW * 0.55f, -eL * 0.4f }, { eW * 0.42f, 0.05f } }, true);
+                    p.Fill(ear, p.Vert(-eL, 0.05f, ScaleRgb(c.body, 1.05f), ScaleRgb(c.body, 0.82f)).get());
+                    break;
+                }
                 // Floppy, hanging ear: wider near the head, rounding to a soft tip, shaded toward
                 // the tip since it hangs in its own shadow.
                 auto ear = p.Smooth({ { -w * 0.55f, 0.0f }, { -w * 0.65f, -L * 0.45f }, { -w * 0.2f, -L * 0.85f },
@@ -790,7 +803,7 @@ namespace ld::animals
             }
         }
 
-        void DrawTail(Pen& p, int sp, Pal const& c)
+        void DrawTail(Pen& p, int sp, int v, Pal const& c)
         {
             switch (sp)
             {
@@ -814,8 +827,12 @@ namespace ld::animals
                     p.Solid(ScaleRgb(c.body, 0.95f)).get(), 0.06f);
                 break;
             case Dog:
-                p.Stroke(p.Smooth({ { 0.02f, 0.0f }, { -0.1f, -0.08f }, { -0.16f, -0.2f }, { -0.1f, -0.32f }, { -0.01f, -0.36f } }, false),
-                    p.Solid(c.body).get(), 0.065f);
+                if (v == 0)
+                    // Rottweiler: short, stubby docked-looking tail rather than a long sweeping one.
+                    p.Dot({ -0.015f, -0.025f }, 0.052f, 0.046f, p.Vert(-0.07f, 0.02f, ScaleRgb(c.body, 1.05f), ScaleRgb(c.body, 0.82f)).get());
+                else
+                    p.Stroke(p.Smooth({ { 0.02f, 0.0f }, { -0.1f, -0.08f }, { -0.16f, -0.2f }, { -0.1f, -0.32f }, { -0.01f, -0.36f } }, false),
+                        p.Solid(c.body).get(), 0.065f);
                 break;
             }
         }
@@ -879,7 +896,7 @@ namespace ld::animals
         switch (part.kind)
         {
         case PartKind::Leg: DrawLeg(p, species, variant, c, r, part.index); break;
-        case PartKind::Tail: DrawTail(p, species, c); break;
+        case PartKind::Tail: DrawTail(p, species, variant, c); break;
         case PartKind::Body: DrawBody(p, species, variant, c, r); break;
         case PartKind::Wing:
         {
@@ -889,7 +906,7 @@ namespace ld::animals
             break;
         }
         case PartKind::Head: DrawHead(p, species, variant, c, r); break;
-        case PartKind::Ear: DrawEar(p, species, c, r); break;
+        case PartKind::Ear: DrawEar(p, species, variant, c, r); break;
         case PartKind::Lid:
         {
             float e = r.eyeR;
