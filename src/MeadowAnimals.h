@@ -97,6 +97,7 @@ namespace ld
         wuc::ExpressionAnimation Expr(Animal const& a, wchar_t const* text) const;
         void To(wuc::CompositionObject const& target, wchar_t const* property, float value, float seconds) const;
         void To(wuc::CompositionObject const& target, wchar_t const* property, float3 value, float seconds) const;
+        void Turn(Animal& a, float face, float seconds) const; // natural turn-around (squash/stretch) instead of a flat mirror flip
         void Keys(wuc::CompositionObject const& target, wchar_t const* property, std::initializer_list<std::pair<float, float>> keys, float seconds, bool loop) const;
         wuc::ContainerVisual LayerVisual(int layer) const;
         float2 PoseAt(Animal const& a) const; // (x, d) right now

@@ -298,6 +298,29 @@ namespace ld
         target.StartAnimation(property, k);
     }
 
+    void MeadowAnimals::Turn(Animal& a, float face, float seconds) const
+    {
+        float from = a.face;
+        a.face = face;
+        if (from == face)
+        {
+            // No actual direction change - just make sure the visual scale matches.
+            To(a.facing, L"Scale", float3(face, 1, 1), seconds);
+            return;
+        }
+        // A plain Scale-X animation through zero reads as a flat mirror flip. Instead squash
+        // thin and a touch taller at the turn point, then settle into the new facing - like a
+        // sprite pivoting on its heel rather than flipping like a card.
+        auto squash = m_c.CreateCubicBezierEasingFunction(float2(0.3f, 0.0f), float2(0.15f, 1.0f));
+        auto settle = m_c.CreateCubicBezierEasingFunction(float2(0.3f, 0.0f), float2(0.25f, 1.0f));
+        auto k = m_c.CreateVector3KeyFrameAnimation();
+        k.InsertKeyFrame(0.0f, float3(from, 1.0f, 1.0f));
+        k.InsertKeyFrame(0.45f, float3(0.0f, 1.2f, 1.0f), squash);
+        k.InsertKeyFrame(1.0f, float3(face, 1.0f, 1.0f), settle);
+        k.Duration(Seconds(seconds));
+        a.facing.StartAnimation(L"Scale", k);
+    }
+
     void MeadowAnimals::Keys(wuc::CompositionObject const& target, wchar_t const* property, std::initializer_list<std::pair<float, float>> keys, float seconds, bool loop) const
     {
         auto k = m_c.CreateScalarKeyFrameAnimation();
@@ -885,8 +908,7 @@ namespace ld
 
         steps.push_back([this, face](Animal& an) {
             an.journeying = true;
-            an.face = face;
-            To(an.facing, L"Scale", float3(face, 1, 1), 0.25f);
+            Turn(an, face, 0.25f);
             To(an.p, L"Walk", 1.0f, 0.3f);
             ShowLabel(an);
             return 0.0f;
@@ -991,12 +1013,17 @@ namespace ld
         off.IterationBehavior(wuc::AnimationIterationBehavior::Forever);
         a.root.StartAnimation(L"Offset", off);
 
+        auto squash = m_c.CreateCubicBezierEasingFunction(float2(0.3f, 0.0f), float2(0.15f, 1.0f));
+        auto settle = m_c.CreateCubicBezierEasingFunction(float2(0.3f, 0.0f), float2(0.25f, 1.0f));
         auto face = m_c.CreateVector3KeyFrameAnimation();
+        // Each turn-around squashes thin/tall at its midpoint instead of mirroring flat, matching Turn().
         face.InsertKeyFrame(0.0f, float3(dir, 1, 1), linear);
-        face.InsertKeyFrame(0.60f, float3(dir, 1, 1), linear);
-        face.InsertKeyFrame(0.615f, float3(-dir, 1, 1), linear);
-        face.InsertKeyFrame(0.95f, float3(-dir, 1, 1), linear);
-        face.InsertKeyFrame(0.965f, float3(dir, 1, 1), linear);
+        face.InsertKeyFrame(0.59f, float3(dir, 1, 1), linear);
+        face.InsertKeyFrame(0.6075f, float3(0.0f, 1.2f, 1), squash);
+        face.InsertKeyFrame(0.625f, float3(-dir, 1, 1), settle);
+        face.InsertKeyFrame(0.94f, float3(-dir, 1, 1), linear);
+        face.InsertKeyFrame(0.9575f, float3(0.0f, 1.2f, 1), squash);
+        face.InsertKeyFrame(0.975f, float3(dir, 1, 1), settle);
         face.InsertKeyFrame(1.0f, float3(dir, 1, 1), linear);
         face.Duration(Seconds(P));
         face.DelayTime(Seconds(delay));
@@ -1055,8 +1082,7 @@ namespace ld
         int level = Escalation(a);
         a.level = level;
         float U = m_U;
-        a.face = a.x < m_W * 0.5f ? 1.0f : -1.0f;
-        To(a.facing, L"Scale", float3(a.face, 1, 1), 0.3f);
+        Turn(a, a.x < m_W * 0.5f ? 1.0f : -1.0f, 0.3f);
         auto linear = m_c.CreateLinearEasingFunction();
         auto up = m_c.CreateCubicBezierEasingFunction(float2(0.2f, 0.7f), float2(0.4f, 1.0f));
         auto down = m_c.CreateCubicBezierEasingFunction(float2(0.6f, 0.0f), float2(0.8f, 0.4f));
@@ -1342,11 +1368,7 @@ namespace ld
         if (a.mode != Mode::Busy && !a.journeying)
         {
             float want = host->x >= fx ? 1.0f : -1.0f;
-            if (want != a.face)
-            {
-                a.face = want;
-                To(a.facing, L"Scale", float3(want, 1, 1), 0.25f);
-            }
+            if (want != a.face) Turn(a, want, 0.25f);
         }
         float headY = fy - a.rig->height * s * m_U * 0.8f;
         float look = std::clamp((host->y - headY) / (3.0f * m_U * s), -0.4f, 0.3f);

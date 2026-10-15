@@ -52,10 +52,14 @@ namespace ld
         m_ctx.pointer.InsertScalar(L"Radius", 400.0f);
 
         auto easeOut = m_ctx.compositor.CreateCubicBezierEasingFunction(float2(0.1f, 0.6f), float2(0.3f, 1.0f));
+        auto followEase = m_ctx.compositor.CreateCubicBezierEasingFunction(float2(0.15f, 0.9f), float2(0.3f, 1.0f));
         m_followAnimation = m_ctx.compositor.CreateVector3KeyFrameAnimation();
         m_followAnimation.InsertExpressionKeyFrame(0.0f, L"this.StartingValue");
-        m_followAnimation.InsertExpressionKeyFrame(1.0f, L"target", easeOut);
-        m_followAnimation.Duration(260ms);
+        m_followAnimation.InsertExpressionKeyFrame(1.0f, L"target", followEase);
+        // Short: this animation restarts on every mouse-move message (one coalesced per frame), so
+        // its duration is effectively how far behind the cursor the grass-bend/firefly reaction
+        // trails. 260ms read as laggy; this keeps a touch of smoothing without a visible delay.
+        m_followAnimation.Duration(90ms);
 
         m_strengthAnimation = m_ctx.compositor.CreateScalarKeyFrameAnimation();
         m_strengthAnimation.InsertExpressionKeyFrame(0.0f, L"this.StartingValue");
