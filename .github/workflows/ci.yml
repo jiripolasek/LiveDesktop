@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (Release)
+        shell: cmd
+        run: build.cmd Release
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          & .\build\LiveDesktop.exe --mock --exit-after 3
+          if ($LASTEXITCODE -ne 0) {
+            throw "LiveDesktop exited with code $LASTEXITCODE"
+          }
+
+      - name: Upload build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiveDesktop-build-${{ github.sha }}
+          path: |
+            build/LiveDesktop.exe
+            build/LiveDesktop.log
+          retention-days: 7
+          if-no-files-found: warn
