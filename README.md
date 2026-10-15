@@ -241,9 +241,9 @@ Each Copilot CLI session becomes a small creature that lives in the landscape an
 
 | Working: busy on the back hills | Waiting: comes to the front and asks |
 | --- | --- |
-| ![Working animals on the back hills](docs/screenshots/meadow-animals-working.jpg) | ![A waiting sheep with its speech bubble](docs/screenshots/meadow-animals-waiting.jpg) |
+| ![Working animals on the back hills](docs/screenshots/meadow-animals-working.jpg) | ![A waiting Rottweiler with its speech bubble](docs/screenshots/meadow-animals-waiting.jpg) |
 | **Finished: jump, spin and petals** | **Night: silhouettes, eye glints, fireflies** |
-| ![A sheep celebrating](docs/screenshots/meadow-animals-celebrate.jpg) | ![The meadow animals at night](docs/screenshots/meadow-animals-night.jpg) |
+| ![A dog celebrating](docs/screenshots/meadow-animals-celebrate.jpg) | ![The meadow animals at night](docs/screenshots/meadow-animals-night.jpg) |
 
 | Status | Behaviour |
 | --- | --- |
@@ -256,7 +256,8 @@ Each Copilot CLI session becomes a small creature that lives in the landscape an
   Scale and haze key frames sampled from the terrain), never teleports. Animals hop between depth
   layers inserted *between* the hill and grass layers. A foreground animal is partly hidden by the
   front grass blades, and a back-hill animal stands on the far ridge.
-- **Species.** Bunny, fox, sheep, deer, hedgehog, duck, cat and snail, in 3 colour variants each. The
+- **Species.** Bunny, fox, sheep, deer, hedgehog, duck, cat, snail and dog (Rottweiler, Golden Doodle,
+  White Doodle), in 3 colour/breed variants each. The
   species and variant come from a hash of the session id, so an agent keeps its animal across
   restarts. Up to 10 animals are shown; active ones take priority.
 - **Art and rig.** Every species is a multi-part rig (body, head, ears, legs, tail, eyelids, eye glint,
