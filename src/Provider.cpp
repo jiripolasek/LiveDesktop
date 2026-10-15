@@ -23,25 +23,6 @@ namespace ld
         }
     }
 
-    bool PullRequestsSnapshot::AnyFailing() const
-    {
-        return std::any_of(mine.begin(), mine.end(), [](auto const& p) { return p.checks == CheckState::Failure; });
-    }
-
-    bool PullRequestsSnapshot::AnyPending() const
-    {
-        return std::any_of(mine.begin(), mine.end(), [](auto const& p) { return p.checks == CheckState::Pending; });
-    }
-
-    std::optional<Meeting> CalendarSnapshot::NextMeeting(TimePoint now) const
-    {
-        for (auto const& m : meetings)
-        {
-            if (!m.allDay && m.start >= now) return m;
-        }
-        return std::nullopt;
-    }
-
     Provider::Provider(std::wstring name, ProviderSettings settings) : m_name(std::move(name)), m_settings(settings) {}
 
     Provider::~Provider() { Stop(); }

@@ -3,7 +3,7 @@
 #include "Scene.h"
 #include "Util.h"
 
-// Small composition building blocks shared by the wallpaper effects and the ambient layer.
+// Small composition building blocks used by the Meadow wallpaper effect.
 namespace ld
 {
     using winrt::Windows::UI::Color;

@@ -1,4 +1,4 @@
-// LiveDesktop - interactive Windows.UI.Composition wallpaper living behind the desktop icons.
+// LiveDesktop - an interactive Meadow wallpaper living behind the desktop icons.
 #include "pch.h"
 #include "Log.h"
 #include "DesktopHost.h"
@@ -7,12 +7,7 @@
 #include "Config.h"
 #include "Providers.h"
 #include "Graphics.h"
-#include "Ambient.h"
-#include "Dashboard.h"
 #include "Reveal.h"
-#include "Clipboard.h"
-#include "ClipboardStack.h"
-#include "DropWindow.h"
 #include "Util.h"
 #include "Snapshot.h"
 #include <map>
@@ -39,56 +34,38 @@ namespace
     constexpr UINT_PTR TIMER_AUTOEXIT = 4;
     constexpr UINT_PTR TIMER_REVEAL = 5;
     constexpr UINT_PTR TIMER_TICK = 6;
-    constexpr UINT_PTR TIMER_DROPHIDE = 7;
 
-    constexpr UINT IDM_NEXT_EFFECT = 100;
     constexpr UINT IDM_PAUSE = 101;
     constexpr UINT IDM_EXIT = 102;
     constexpr UINT IDM_MOCK = 103;
-    constexpr UINT IDM_DASHBOARD = 104;
-    constexpr UINT IDM_NEXT_SCENE = 105;
-    constexpr UINT IDM_CLIPBOARD = 106;
     constexpr UINT kTrayId = 1;
     constexpr ULONG_PTR kCopyDataCommand = 0x4C44; // 'LD'
 
-    enum class DashboardMode { Auto, On, Off };
-
     struct Options
     {
-        size_t effect = 0;
         bool layered = false;
         bool refreshWallpaper = true;
         UINT exitAfterSeconds = 0;
         bool mock = false;
-        std::wstring scene;          // forced scene (overrides the virtual-desktop mapping)
-        bool dashboard = false;      // start with the dashboard forced on
     };
 
     struct Providers
     {
         std::unique_ptr<SessionsProvider> sessions;
-        std::unique_ptr<GitHubProvider> github;
-        std::unique_ptr<SystemProvider> system;
-        std::unique_ptr<CalendarProvider> calendar;
-        std::unique_ptr<PortsProvider> ports;
-        std::unique_ptr<LogTailProvider> logTail;
-        std::unique_ptr<WorktreesProvider> worktrees;
 
         template <class F> void ForEach(F&& f)
         {
-            Provider* all[] = { sessions.get(), github.get(), system.get(), calendar.get(), ports.get(), logTail.get(), worktrees.get() };
+            Provider* all[] = { sessions.get() };
             for (auto* p : all) if (p) f(*p);
         }
     };
 
-    // Left-button press being tracked for a click on a dashboard card or a clipboard card.
+    // Left-button press being tracked for a click on a Meadow animal (agent).
     struct PendingClick
     {
         bool active = false;
         POINT screen{};
         ULONGLONG tick = 0;
-        Dashboard::Hit hit;
-        std::optional<uint64_t> clip;
         std::optional<std::wstring> agent;
     };
 
@@ -114,25 +91,12 @@ namespace
 
         Config config;
         Graphics graphics;
-        Ambient ambient;
-        Dashboard dashboard;
         RevealMonitor reveal;
         Providers providers;
-        VirtualDesktopWatcher desktops;
-        SceneLayout layout;
         bool mock = false;
-        std::wstring sceneName = L"default";
-        std::wstring sceneOverride;        // tray / --scene / --send; cleared when the virtual desktop changes
-        VirtualDesktopInfo desktop;
-        DashboardMode dashboardMode = DashboardMode::Auto;
-        bool revealed = false;
         bool occluded = false;
-        std::wstring revealReason;
         PendingClick click;
-        ClipboardWatcher clipboard;
-        ClipboardStack stack;
-        DropWindow drop;
-        bool buttonDown = false;           // left button held anywhere (drag-to-shelf detection)
+        bool buttonDown = false;
         POINT downAt{};
         // Last sessions snapshot from the provider, plus statuses forced via --send agent:<n>:<state>.
         std::optional<SessionsSnapshot> sessions;
@@ -261,17 +225,16 @@ namespace
         return covers;
     }
 
-    // Paused = nothing animates. "Heavy" pause (fullscreen app, or the desktop fully covered with no
-    // dashboard showing) also throttles the providers.
+    // Paused = nothing animates. "Heavy" pause (fullscreen app, or the desktop fully occluded) also
+    // throttles the providers.
     void UpdatePaused()
     {
-        // Fully occluded means nothing of the desktop is visible, so even a forced dashboard can stop rendering.
         bool heavy = !g_app.forceRender && (g_app.fullscreenPaused || g_app.occluded);
         bool paused = g_app.userPaused || heavy;
         if (paused != g_app.scene.Paused())
         {
-            Log(L"Rendering %s (user=%d fullscreen=%d occluded=%d dashboard=%d)", paused ? L"paused" : L"resumed",
-                g_app.userPaused, g_app.fullscreenPaused, g_app.occluded, g_app.dashboard.Visible());
+            Log(L"Rendering %s (user=%d fullscreen=%d occluded=%d)", paused ? L"paused" : L"resumed",
+                g_app.userPaused, g_app.fullscreenPaused, g_app.occluded);
         }
         g_app.scene.SetPaused(paused);
 
@@ -280,8 +243,7 @@ namespace
         if (throttle != lastThrottle)
         {
             lastThrottle = throttle;
-            Provider* system = g_app.providers.system.get();
-            g_app.providers.ForEach([&](Provider& p) { p.SetThrottle(&p == system ? (heavy ? 0 : 1) : throttle); });
+            g_app.providers.ForEach([&](Provider& p) { p.SetThrottle(throttle); });
         }
     }
 
@@ -319,7 +281,7 @@ namespace
         nid.hWnd = g_app.controller;
         nid.uID = kTrayId;
         nid.uFlags = NIF_TIP | NIF_SHOWTIP;
-        swprintf_s(nid.szTip, L"LiveDesktop - %s, %s scene%s%s", g_app.scene.CurrentEffectName(), g_app.sceneName.c_str(),
+        swprintf_s(nid.szTip, L"LiveDesktop - %s%s%s", g_app.scene.EffectName(),
             g_app.mock ? L", mock" : L"", g_app.userPaused ? L" (paused)" : L"");
         Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
@@ -332,7 +294,7 @@ namespace
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
         nid.uCallbackMessage = WM_APP_TRAY;
         nid.hIcon = g_app.icon;
-        swprintf_s(nid.szTip, L"LiveDesktop - %s", g_app.scene.CurrentEffectName());
+        swprintf_s(nid.szTip, L"LiveDesktop - %s", g_app.scene.EffectName());
         Shell_NotifyIconW(NIM_DELETE, &nid);
         g_app.trayAdded = Shell_NotifyIconW(NIM_ADD, &nid) != FALSE;
         if (g_app.trayAdded)
@@ -356,19 +318,10 @@ namespace
     void ShowTrayMenu(POINT pt)
     {
         HMENU menu = CreatePopupMenu();
-        wchar_t next[128];
-        swprintf_s(next, L"Next effect\t(current: %s)", g_app.scene.CurrentEffectName());
-        AppendMenuW(menu, MF_STRING, IDM_NEXT_EFFECT, next);
-        wchar_t scene[128];
-        swprintf_s(scene, L"Next scene\t(current: %s)", g_app.sceneName.c_str());
-        AppendMenuW(menu, MF_STRING, IDM_NEXT_SCENE, scene);
-        AppendMenuW(menu, MF_STRING | (g_app.dashboardMode == DashboardMode::On ? MF_CHECKED : 0), IDM_DASHBOARD, L"Force dashboard");
         AppendMenuW(menu, MF_STRING | (g_app.mock ? MF_CHECKED : 0), IDM_MOCK, L"Mock data");
-        AppendMenuW(menu, MF_STRING | (g_app.stack.Enabled() ? MF_CHECKED : 0), IDM_CLIPBOARD, L"Clipboard shelf");
         AppendMenuW(menu, MF_STRING | (g_app.userPaused ? MF_CHECKED : 0), IDM_PAUSE, L"Pause animations");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, IDM_EXIT, L"Exit");
-        SetMenuDefaultItem(menu, IDM_NEXT_EFFECT, FALSE);
         SetForegroundWindow(g_app.controller);
         TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, g_app.controller, nullptr);
         PostMessageW(g_app.controller, WM_NULL, 0, 0);
@@ -384,20 +337,10 @@ namespace
         return float2(static_cast<float>(s.cx), static_cast<float>(s.cy));
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // Layout, scenes, dashboard
-    // ---------------------------------------------------------------------------------------------
     float2 ToLocal(POINT screen)
     {
         POINT p = g_app.host.ScreenToHost(screen);
         return float2(static_cast<float>(p.x), static_cast<float>(p.y));
-    }
-
-    RECT RectToHost(RECT const& r)
-    {
-        POINT a = g_app.host.ScreenToHost(POINT{ r.left, r.top });
-        POINT b = g_app.host.ScreenToHost(POINT{ r.right, r.bottom });
-        return RECT{ a.x, a.y, b.x, b.y };
     }
 
     HMONITOR PrimaryMonitor(MONITORINFO& info)
@@ -419,104 +362,21 @@ namespace
         return areas;
     }
 
-    bool SameRects(std::vector<RECT> const& a, std::vector<RECT> const& b)
+    // Recomputes the primary monitor's DPI scale and pushes it to the graphics layer (text/label sizing).
+    void ApplyDpiScale()
     {
-        if (a.size() != b.size()) return false;
-        for (size_t i = 0; i < a.size(); ++i) if (!EqualRect(&a[i], &b[i])) return false;
-        return true;
-    }
-
-    // Recomputes the host-space layout (monitors, primary work area, DPI scale, icon cells) and pushes it
-    // to the ambient + dashboard layers if anything changed.
-    void ApplyLayout(bool force)
-    {
-        if (!g_app.host.IsAttached()) return;
-        SceneLayout layout;
-        layout.size = HostSize();
-        layout.monitors = g_app.host.MonitorRectsInHost();
         MONITORINFO mi;
         HMONITOR primary = PrimaryMonitor(mi);
-        layout.primary = RectToHost(mi.rcMonitor);
-        layout.primaryWork = RectToHost(mi.rcWork);
         UINT dpiX = 96, dpiY = 96;
-        if (SUCCEEDED(GetDpiForMonitor(primary, MDT_EFFECTIVE_DPI, &dpiX, &dpiY))) layout.scale = dpiX / 96.0f;
-        std::vector<RECT> icons;
-        if (g_app.icons.IconRects(icons))
+        if (SUCCEEDED(GetDpiForMonitor(primary, MDT_EFFECTIVE_DPI, &dpiX, &dpiY)))
         {
-            for (auto const& r : icons) layout.icons.push_back(RectToHost(r));
-        }
-        else
-        {
-            layout.icons = g_app.layout.icons; // keep the last known cells if Explorer is busy
-        }
-
-        auto const& old = g_app.layout;
-        bool changed = force || old.size.x != layout.size.x || old.size.y != layout.size.y || old.scale != layout.scale ||
-            !EqualRect(&old.primaryWork, &layout.primaryWork) || !SameRects(old.monitors, layout.monitors) ||
-            !SameRects(old.icons, layout.icons);
-        if (!changed) return;
-        g_app.layout = layout;
-        Log(L"Layout: host %.0fx%.0f, primary work (%ld,%ld)-(%ld,%ld) host px, scale %.2f, %zu icon cells",
-            layout.size.x, layout.size.y, layout.primaryWork.left, layout.primaryWork.top, layout.primaryWork.right,
-            layout.primaryWork.bottom, layout.scale, layout.icons.size());
-        g_app.graphics.SetScale(layout.scale);
-        g_app.ambient.SetLayout(layout);
-        g_app.stack.SetLayout(layout);
-        g_app.dashboard.SetReserved(g_app.stack.Enabled() ? g_app.stack.Footprint() : RECT{});
-        g_app.dashboard.SetLayout(layout);
-    }
-
-    std::wstring ResolveScene()
-    {
-        if (!g_app.sceneOverride.empty()) return g_app.sceneOverride;
-        auto const& d = g_app.desktop;
-        std::wstring id = ToLower(d.id), name = ToLower(d.name), index = std::to_wstring(d.index);
-        for (auto const& [key, scene] : g_app.config.desktopScenes)
-        {
-            if ((!id.empty() && key == id) || (!name.empty() && key == name) || (d.index > 0 && key == index)) return scene;
-        }
-        return g_app.config.defaultScene;
-    }
-
-    void UpdateDashboard();
-
-    void ApplyScene(bool force = false)
-    {
-        ScenePreset preset = PresetFor(ResolveScene());
-        if (!force && preset.name == g_app.sceneName) return;
-        g_app.sceneName = preset.name;
-        Log(L"Scene '%s' (virtual desktop %d '%s' %s%s)", preset.name.c_str(), g_app.desktop.index,
-            g_app.desktop.name.c_str(), g_app.desktop.id.c_str(), g_app.sceneOverride.empty() ? L"" : L", overridden");
-        g_app.ambient.SetPreset(preset);
-        g_app.dashboard.SetPreset(preset);
-        g_app.stack.SetPreset(preset);
-        UpdateDashboard();
-        UpdateTrayTip();
-    }
-
-    void UpdateDashboard()
-    {
-        bool want = g_app.dashboardMode == DashboardMode::On ||
-            (g_app.dashboardMode == DashboardMode::Auto && g_app.revealed && !g_app.fullscreenPaused);
-        bool before = g_app.dashboard.Visible();
-        // Icons may have moved since the last reveal: refresh the free region before the cards animate in.
-        if (want && !before) ApplyLayout(false);
-        g_app.dashboard.Show(want);
-        bool shown = g_app.dashboard.Visible();
-        if (shown != before)
-        {
-            Log(L"Dashboard %s", shown ? L"shown" : L"hidden");
-            g_app.ambient.SetDashboardVisible(shown);
-            if (!shown) g_app.dashboard.Hover(std::nullopt);
-            if (shown)
+            float scale = dpiX / 96.0f;
+            if (scale != g_app.graphics.Scale())
             {
-                // Refresh cheap, glanceable data the moment the user looks at it.
-                if (g_app.providers.ports) g_app.providers.ports->Wake();
-                if (g_app.providers.sessions) g_app.providers.sessions->Wake();
-                if (g_app.providers.worktrees) g_app.providers.worktrees->Wake();
+                g_app.graphics.SetScale(scale);
+                Log(L"DPI scale: %.2f", scale);
             }
         }
-        UpdatePaused();
     }
 
     void EvaluateReveal()
@@ -524,16 +384,12 @@ namespace
         MONITORINFO mi;
         PrimaryMonitor(mi);
         auto state = g_app.reveal.Evaluate(mi.rcWork, WorkAreas());
-        if (state.revealed != g_app.revealed || state.occluded != g_app.occluded ||
-            (!state.revealed && state.reason != g_app.revealReason))
+        if (state.occluded != g_app.occluded)
         {
-            Log(L"Desktop %s%s: %s", state.revealed ? L"revealed" : L"not revealed",
-                state.occluded ? L" (fully occluded)" : L"", state.reason.c_str());
+            Log(L"Desktop %s: %s", state.occluded ? L"fully occluded" : L"visible", state.reason.c_str());
         }
-        g_app.revealed = state.revealed;
         g_app.occluded = state.occluded;
-        g_app.revealReason = state.reason;
-        UpdateDashboard();
+        UpdatePaused();
     }
 
     void SetMock(bool mock)
@@ -542,50 +398,6 @@ namespace
         g_app.mock = mock;
         Log(L"Mock data %s", mock ? L"on" : L"off");
         g_app.providers.ForEach([&](Provider& p) { p.SetMock(mock); });
-        g_app.clipboard.SetMock(mock);
-        UpdateTrayTip();
-    }
-
-    void StartClipboard()
-    {
-        g_app.clipboard.OnSnapshot = [](ClipboardSnapshot const& s) { g_app.stack.Update(s); };
-        g_app.clipboard.Start(g_app.scene.Queue(), g_app.mock, static_cast<size_t>(g_app.config.clipboardItems));
-    }
-
-    // Hiding the shelf also stops watching the clipboard (and forgets the in-memory history).
-    void SetClipboardShelf(bool enabled)
-    {
-        if (enabled == g_app.stack.Enabled()) return;
-        g_app.drop.Hide();
-        if (enabled) StartClipboard();
-        else
-        {
-            g_app.clipboard.Stop();
-            g_app.stack.Update(ClipboardSnapshot{});
-        }
-        g_app.stack.SetEnabled(enabled);
-        ApplyLayout(true);
-    }
-
-    void SetSceneOverride(std::wstring name)
-    {
-        g_app.sceneOverride = std::move(name);
-        ApplyScene();
-    }
-
-    void NextScene()
-    {
-        auto names = SceneNames();
-        auto it = std::find(names.begin(), names.end(), g_app.sceneName);
-        size_t next = it == names.end() ? 0 : (static_cast<size_t>(it - names.begin()) + 1) % names.size();
-        SetSceneOverride(names[next]);
-    }
-
-    void SetDashboardMode(DashboardMode mode)
-    {
-        g_app.dashboardMode = mode;
-        Log(L"Dashboard mode: %s", mode == DashboardMode::On ? L"forced on" : mode == DashboardMode::Off ? L"forced off" : L"auto (Win+D)");
-        UpdateDashboard();
         UpdateTrayTip();
     }
 
@@ -614,9 +426,9 @@ namespace
         }
         g_app.displaySignature = DesktopHost::DisplaySignature();
         g_app.icons.Reset();
-        ApplyLayout(true);
+        ApplyDpiScale();
         Log(L"Attached. Effect '%s' rendering into HWND 0x%p (parent 0x%p)",
-            g_app.scene.CurrentEffectName(), g_app.host.Hwnd(), g_app.host.Windows().parent);
+            g_app.scene.EffectName(), g_app.host.Hwnd(), g_app.host.Windows().parent);
         return true;
     }
 
@@ -638,7 +450,7 @@ namespace
         g_app.displaySignature = signature;
         g_app.host.UpdateBounds();
         g_app.scene.Resize(HostSize(), g_app.host.MonitorRectsInHost());
-        ApplyLayout(true);
+        ApplyDpiScale();
     }
 
     void BeginExit(const wchar_t* reason)
@@ -652,12 +464,8 @@ namespace
         KillTimer(g_app.controller, TIMER_AUTOEXIT);
         KillTimer(g_app.controller, TIMER_REVEAL);
         KillTimer(g_app.controller, TIMER_TICK);
-        KillTimer(g_app.controller, TIMER_DROPHIDE);
         g_app.reveal.Stop();
         StopHookThread();
-        g_app.drop.Destroy();
-        g_app.clipboard.Stop();
-        g_app.desktops.Stop();
         g_app.providers.ForEach([](Provider& p) { p.Stop(); });
         Detach();
         RemoveTrayIcon();
@@ -665,7 +473,7 @@ namespace
         DestroyWindow(g_app.controller);
     }
 
-    // Sessions from the provider with any --send agent:<n>:<state> overrides applied, to every consumer.
+    // Sessions from the provider with any --send agent:<n>:<state> overrides applied, to the scene.
     void ForwardSessions()
     {
         if (!g_app.sessions) return;
@@ -692,8 +500,6 @@ namespace
                 return a.lastActivity > b.lastActivity;
             });
         }
-        g_app.ambient.Update(s);
-        g_app.dashboard.Update(s);
         g_app.scene.UpdateSessions(s);
     }
 
@@ -743,13 +549,6 @@ namespace
     void HandleCommand(std::wstring const& raw)
     {
         std::wstring trimmed = Trim(raw);
-        if (ToLower(trimmed.substr(0, 5)) == L"clip:")
-        {
-            // Case-preserving: simulates a drop of text onto the shelf.
-            Log(L"Command: clip (%zu chars)", trimmed.size() - 5);
-            g_app.clipboard.AddText(trimmed.substr(5), L"send");
-            return;
-        }
         if (ToLower(trimmed.substr(0, 9)) == L"snapshot:")
         {
             // Case-preserving path. Captures the composition tree offscreen (works while locked/covered).
@@ -767,40 +566,15 @@ namespace
             return true;
         };
         std::wstring value;
-        if (cmd == L"next-effect" || cmd == L"next") { g_app.scene.NextEffect(); UpdateTrayTip(); }
-        else if (cmd == L"next-scene") NextScene();
-        else if (arg(L"scene:", value)) SetSceneOverride(value == L"auto" ? L"" : value);
-        else if (arg(L"effect:", value)) { g_app.scene.SetEffect(static_cast<size_t>(_wtoi(value.c_str())) % g_app.scene.EffectCount()); UpdateTrayTip(); }
-        else if (arg(L"time:", value))
+        if (arg(L"time:", value))
         {
             float hour = MeadowPhaseHour(value);
             if (hour < -1.5f) Log(L"Unknown time '%s'", value.c_str());
             else g_app.scene.SetTimeOverride(hour);
         }
-        else if (arg(L"dashboard:", value))
-            SetDashboardMode(value == L"on" ? DashboardMode::On : value == L"off" ? DashboardMode::Off : DashboardMode::Auto);
         else if (arg(L"mock:", value)) SetMock(value == L"on");
         else if (arg(L"agent:", value)) HandleAgentCommand(value);
         else if (arg(L"render:", value)) { g_app.forceRender = value == L"on"; UpdatePaused(); }
-        else if (arg(L"stack:", value))
-        {
-            if (value == L"open") g_app.stack.ForceFan(true);
-            else if (value == L"close") g_app.stack.ForceFan(false);
-            else if (value == L"auto") g_app.stack.ForceFan(std::nullopt);
-            else if (value == L"drop") g_app.stack.SetDropHover(true);
-            else if (value == L"nodrop") g_app.stack.SetDropHover(false);
-            else if (value == L"on" || value == L"off") SetClipboardShelf(value == L"on");
-        }
-        else if (arg(L"ci:", value))
-        {
-            Mocks().ci = value == L"red" ? 1 : value == L"green" ? -1 : 0;
-            if (g_app.providers.github) g_app.providers.github->Wake();
-        }
-        else if (arg(L"log:", value))
-        {
-            Mocks().logError = value == L"error";
-            if (g_app.providers.logTail) g_app.providers.logTail->Wake();
-        }
         else if (cmd == L"pause") { g_app.userPaused = !g_app.userPaused; UpdatePaused(); UpdateTrayTip(); }
         else if (cmd == L"stop" || cmd == L"exit") BeginExit(L"--send stop");
         else if (cmd.rfind(L"hit:", 0) == 0)
@@ -810,11 +584,9 @@ namespace
             if (swscanf_s(cmd.c_str() + 4, L"%ld,%ld", &pt.x, &pt.y) != 2) return;
             ReplyMessage(TRUE); // release the sender so the icon COM call isn't an input-synchronous callout
             float2 local = ToLocal(pt);
-            auto hit = g_app.dashboard.HitTest(local);
             auto agent = g_app.scene.HitAgent(local);
-            Log(L"hit %ld,%ld -> local %.0f,%.0f desktop=%d icon=%d card=%d item=%s agent=%s", pt.x, pt.y, local.x, local.y,
-                IsDesktopAt(pt) ? 1 : 0, g_app.icons.HitTestIcon(pt) ? 1 : 0, g_app.dashboard.InsideCard(local) ? 1 : 0,
-                hit ? hit->url.c_str() : L"-", agent ? agent->c_str() : L"-");
+            Log(L"hit %ld,%ld -> local %.0f,%.0f desktop=%d icon=%d agent=%s", pt.x, pt.y, local.x, local.y,
+                IsDesktopAt(pt) ? 1 : 0, g_app.icons.HitTestIcon(pt) ? 1 : 0, agent ? agent->c_str() : L"-");
         }
         else if (cmd == L"agents?")
         {
@@ -871,27 +643,10 @@ namespace
             bool over = !g_app.fullscreenPaused && IsDesktopAt(pt);
             float2 local = ToLocal(pt);
             g_app.scene.PointerMoved(local, over);
-            bool onStack = over && g_app.stack.Contains(local);
-            if (!g_app.buttonDown) g_app.stack.Hover(over ? std::optional<float2>(local) : std::nullopt);
-            if (g_app.dashboard.Visible())
-                g_app.dashboard.Hover(over && !onStack ? std::optional<float2>(local) : std::nullopt);
             if (g_app.scene.HostsAgents())
             {
-                bool free = over && !onStack && !(g_app.dashboard.Visible() && g_app.dashboard.InsideCard(local));
+                bool free = over && !g_app.icons.HitTestIcon(pt);
                 g_app.scene.HoverAgent(free ? std::optional<float2>(local) : std::nullopt);
-            }
-
-            // Something is being dragged towards the shelf: put the (invisible) drop window over it.
-            if (g_app.buttonDown && g_app.stack.Enabled() && !g_app.fullscreenPaused &&
-                (std::abs(pt.x - g_app.downAt.x) > 8 || std::abs(pt.y - g_app.downAt.y) > 8))
-            {
-                RECT zone = g_app.stack.DropZone();
-                POINT origin{};
-                MapWindowPoints(g_app.host.Hwnd(), HWND_DESKTOP, &origin, 1);
-                OffsetRect(&zone, origin.x, origin.y);
-                bool inZone = PtInRect(&zone, pt) != FALSE;
-                if (inZone && !g_app.drop.Visible() && IsDesktopAt(pt)) g_app.drop.Show(zone);
-                else if (!inZone && g_app.drop.Visible() && !g_app.drop.InDrag()) g_app.drop.Hide();
             }
             return 0;
         }
@@ -901,28 +656,14 @@ namespace
             POINT pt{ static_cast<LONG>(wParam), static_cast<LONG>(lParam) };
             g_app.buttonDown = true;
             g_app.downAt = pt;
-            KillTimer(hwnd, TIMER_DROPHIDE);
             if (!g_app.host.IsAttached() || g_app.fullscreenPaused) return 0;
             if (!IsDesktopAt(pt) || g_app.icons.HitTestIcon(pt)) return 0;
             float2 local = ToLocal(pt);
-            if (g_app.stack.Contains(local))
-            {
-                if (auto id = g_app.stack.HitTest(local))
-                    g_app.click = PendingClick{ true, pt, GetTickCount64(), {}, id };
-                return 0;
-            }
-            if (g_app.dashboard.Visible() && g_app.dashboard.InsideCard(local))
-            {
-                // Cards act on button-up (a click, not a drag/rubber-band selection).
-                if (auto hit = g_app.dashboard.HitTest(local))
-                    g_app.click = PendingClick{ true, pt, GetTickCount64(), *hit, std::nullopt };
-                return 0;
-            }
             if (auto agent = g_app.scene.HitAgent(local))
             {
-                // Animals open their session on button-up, like the cards.
+                // Animals open their session on button-up, like a normal click.
                 Log(L"Click down %ld,%ld -> agent %s", pt.x, pt.y, agent->c_str());
-                g_app.click = PendingClick{ true, pt, GetTickCount64(), {}, std::nullopt, agent };
+                g_app.click = PendingClick{ true, pt, GetTickCount64(), agent };
                 return 0;
             }
             g_app.scene.Click(local);
@@ -931,8 +672,6 @@ namespace
         case WM_APP_RELEASE:
         {
             g_app.buttonDown = false;
-            // An OLE drop completes around button-up; give it a moment, then tidy up.
-            if (g_app.drop.Visible()) SetTimer(hwnd, TIMER_DROPHIDE, 500, nullptr);
             if (!g_app.click.active) return 0;
             g_app.click.active = false;
             POINT pt{ static_cast<LONG>(wParam), static_cast<LONG>(lParam) };
@@ -948,15 +687,6 @@ namespace
                 return 0;
             }
             float2 local = ToLocal(pt);
-            if (g_app.click.clip)
-            {
-                if (g_app.stack.HitTest(local) == g_app.click.clip)
-                {
-                    g_app.stack.Activate(*g_app.click.clip);
-                    g_app.clipboard.Copy(*g_app.click.clip);
-                }
-                return 0;
-            }
             if (g_app.click.agent)
             {
                 if (g_app.scene.HitAgent(local) != g_app.click.agent)
@@ -979,9 +709,6 @@ namespace
                 g_app.agentOpenTimer = timer;
                 return 0;
             }
-            if (!g_app.dashboard.Visible()) return 0;
-            auto hit = g_app.dashboard.HitTest(local);
-            if (hit && *hit == g_app.click.hit) g_app.dashboard.Activate(*hit);
             return 0;
         }
         case WM_APP_REVEAL:
@@ -1006,20 +733,12 @@ namespace
             case WM_RBUTTONUP:
                 ShowTrayMenu(POINT{ GET_X_LPARAM(wParam), GET_Y_LPARAM(wParam) });
                 break;
-            case NIN_SELECT:
-            case NIN_KEYSELECT:
-                SendMessageW(hwnd, WM_COMMAND, IDM_NEXT_EFFECT, 0);
-                break;
             }
             return 0;
 
         case WM_COMMAND:
             switch (LOWORD(wParam))
             {
-            case IDM_NEXT_EFFECT:
-                g_app.scene.NextEffect();
-                UpdateTrayTip();
-                break;
             case IDM_PAUSE:
                 g_app.userPaused = !g_app.userPaused;
                 Log(L"User %s animations", g_app.userPaused ? L"paused" : L"resumed");
@@ -1031,15 +750,6 @@ namespace
                 break;
             case IDM_MOCK:
                 SetMock(!g_app.mock);
-                break;
-            case IDM_DASHBOARD:
-                SetDashboardMode(g_app.dashboardMode == DashboardMode::On ? DashboardMode::Auto : DashboardMode::On);
-                break;
-            case IDM_NEXT_SCENE:
-                NextScene();
-                break;
-            case IDM_CLIPBOARD:
-                SetClipboardShelf(!g_app.stack.Enabled());
                 break;
             }
             return 0;
@@ -1081,17 +791,6 @@ namespace
                 if (!g_app.scene.Paused())
                 {
                     g_app.scene.Tick();
-                    g_app.ambient.Tick();
-                    g_app.dashboard.Tick();
-                    g_app.stack.Tick();
-                }
-                return 0;
-            case TIMER_DROPHIDE:
-                KillTimer(hwnd, TIMER_DROPHIDE);
-                if (!g_app.drop.InDrag())
-                {
-                    g_app.drop.Hide();
-                    g_app.stack.SetDropHover(false);
                 }
                 return 0;
             case TIMER_REATTACH:
@@ -1154,23 +853,16 @@ namespace
 
     void PrintUsage()
     {
-        wprintf(L"LiveDesktop - interactive composition wallpaper behind the desktop icons\n\n"
+        wprintf(L"LiveDesktop - an interactive Meadow wallpaper living behind the desktop icons\n\n"
                 L"Usage: LiveDesktop.exe [options]\n"
-                L"  --effect <n>            start with effect n (0=Meadow, 1=Aurora, 2=Fireflies, 3=Ember)\n"
-                L"  --mock                  use realistic fake data for every provider (no credentials needed)\n"
-                L"  --scene <name>          force a scene: default | work | focus (else per virtual desktop)\n"
-                L"  --dashboard             start with the dashboard forced visible (no Win+D needed)\n"
+                L"  --mock                  use realistic fake session data (no credentials needed)\n"
                 L"  --exit-after <seconds>  exit automatically (for testing)\n"
                 L"  --no-wallpaper-refresh  do not re-apply the wallpaper on exit\n"
                 L"  --layered               experimental: make the host a layered child window\n"
-                L"  --next                  tell the running instance to switch effect\n"
                 L"  --stop                  tell the running instance to exit cleanly\n"
                 L"  --send <command>        send a command to the running instance:\n"
-                L"                            next-effect | effect:<n> | next-scene | scene:<name|auto>\n"
-                L"                            dashboard:on|off|auto | mock:on|off | ci:red|green|mixed\n"
-                L"                            log:error|ok | pause | stop | hit:<x>,<y>\n"
+                L"                            mock:on|off | pause | stop | hit:<x>,<y> | agents?\n"
                 L"                            time:<dawn|sunrise|morning|day|afternoon|golden|sunset|dusk|night|HH:MM|auto>\n"
-                L"                            stack:open|close|auto|drop|nodrop|on|off | clip:<text>\n"
                 L"                            agent:<n|id-prefix>:<working|waiting|done|idle|auto> | agent:list | agent:auto\n"
                 L"                            render:on|auto (keep animating while covered) | snapshot:<file.png>\n"
                 L"Ctrl+C, the tray menu 'Exit', or WM_CLOSE exit cleanly.\n"
@@ -1202,19 +894,16 @@ namespace
         {
             std::wstring arg = argv[i];
             auto next = [&]() -> const wchar_t* { return i + 1 < argc ? argv[++i] : L"0"; };
-            if (arg == L"--effect") opts.effect = static_cast<size_t>(_wtoi(next()));
-            else if (arg == L"--exit-after") opts.exitAfterSeconds = static_cast<UINT>(_wtoi(next()));
+            if (arg == L"--exit-after") opts.exitAfterSeconds = static_cast<UINT>(_wtoi(next()));
             else if (arg == L"--no-wallpaper-refresh") opts.refreshWallpaper = false;
             else if (arg == L"--layered") opts.layered = true;
             else if (arg == L"--mock") opts.mock = true;
-            else if (arg == L"--scene") opts.scene = ToLower(next());
-            else if (arg == L"--dashboard") opts.dashboard = true;
             else if (arg == L"--send")
             {
                 commandExit = SendCommand(next());
                 return false;
             }
-            else if (arg == L"--stop" || arg == L"--next")
+            else if (arg == L"--stop")
             {
                 HWND controller = FindWindowW(kControllerClass, nullptr);
                 if (!controller)
@@ -1223,8 +912,7 @@ namespace
                     commandExit = 1;
                     return false;
                 }
-                if (arg == L"--stop") PostMessageW(controller, WM_CLOSE, 0, 0);
-                else PostMessageW(controller, WM_COMMAND, IDM_NEXT_EFFECT, 0);
+                PostMessageW(controller, WM_CLOSE, 0, 0);
                 wprintf(L"Sent %s to running instance.\n", arg.c_str());
                 commandExit = 0;
                 return false;
@@ -1254,7 +942,7 @@ int wmain(int argc, wchar_t** argv)
     HANDLE mutex = CreateMutexW(nullptr, TRUE, kMutexName);
     if (GetLastError() == ERROR_ALREADY_EXISTS)
     {
-        wprintf(L"LiveDesktop is already running (use --stop or --next).\n");
+        wprintf(L"LiveDesktop is already running (use --stop).\n");
         return 1;
     }
 
@@ -1300,11 +988,10 @@ int wmain(int argc, wchar_t** argv)
         Log(L"Composition initialization failed: 0x%08X %s", e.code().value, e.message().c_str());
         return 1;
     }
-    g_app.scene.SetEffect(g_app.options.effect % g_app.scene.EffectCount());
 
     g_app.config = LoadConfig();
     g_app.mock = g_app.options.mock || g_app.config.mock;
-    Log(L"Config: %s (%zu repos, mock=%d)", g_app.config.path.c_str(), g_app.config.repos.size(), g_app.mock);
+    Log(L"Config: %s (mock=%d)", g_app.config.path.c_str(), g_app.mock);
     try
     {
         g_app.graphics.Initialize(g_app.scene.Compositor());
@@ -1317,45 +1004,12 @@ int wmain(int argc, wchar_t** argv)
     }
     g_app.graphics.OnDeviceReplaced = [] {
         Log(L"Graphics device replaced -> redrawing surfaces");
-        g_app.ambient.RedrawAll();
-        g_app.dashboard.RedrawAll();
-        g_app.stack.RedrawAll();
         g_app.scene.Refresh();
     };
-    // The log tail is opt-in (config logTail.enabled + logPath); mock mode always demos it.
-    Config providerConfig = g_app.config;
-    if (g_app.mock) providerConfig.logTail.enabled = true;
-    g_app.ambient.Initialize(g_app.scene, g_app.graphics, g_app.config.focusMinutes);
-    g_app.scene.OnEffectChanged = [] { g_app.ambient.SetOrbsHidden(g_app.scene.HostsAgents()); };
-    g_app.scene.OnEffectChanged();
-    g_app.dashboard.Initialize(g_app.scene, g_app.graphics, providerConfig.logTail.enabled);
-    g_app.stack.Initialize(g_app.scene, g_app.graphics);
-    g_app.stack.SetEnabled(g_app.config.clipboard.enabled);
-    g_app.drop.OnDragHover = [](bool active) { g_app.stack.SetDropHover(active); };
-    g_app.drop.OnDrop = [](std::vector<std::wstring> files, std::wstring text) {
-        Log(L"Dropped on the clipboard shelf: %zu file(s), %zu chars", files.size(), text.size());
-        if (!files.empty())
-        {
-            g_app.stack.Dropped(files.size() == 1 ? std::wstring(L"1 file") : std::to_wstring(files.size()) + L" files");
-            g_app.clipboard.AddFiles(std::move(files), L"Dropped");
-        }
-        else
-        {
-            g_app.stack.Dropped(L"text");
-            g_app.clipboard.AddText(std::move(text), L"Dropped");
-        }
-    };
-    // OLE (on top of the STA set up above) for the shelf's drop target.
-    bool ole = SUCCEEDED(OleInitialize(nullptr));
-    if (ole) g_app.drop.Create(g_app.instance);
-    else Log(L"OleInitialize failed - dropping onto the clipboard shelf is disabled");
-    g_app.sceneOverride = g_app.options.scene;
-    g_app.desktop = VirtualDesktopWatcher::ReadCurrent();
-    g_app.dashboardMode = g_app.options.dashboard ? DashboardMode::On : DashboardMode::Auto;
-    ApplyScene(true);
 
     g_app.icon = CreateAppIcon(GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()));
     AddTrayIcon();
+    UpdateTrayTip();
 
     if (!TryAttach())
     {
@@ -1370,36 +1024,14 @@ int wmain(int argc, wchar_t** argv)
     // Data providers: background threads -> immutable snapshots -> UI thread via the DispatcherQueue.
     {
         auto& p = g_app.providers;
-        p.sessions = std::make_unique<SessionsProvider>(providerConfig);
-        p.github = std::make_unique<GitHubProvider>(providerConfig);
-        p.system = std::make_unique<SystemProvider>(providerConfig);
-        p.calendar = std::make_unique<CalendarProvider>(providerConfig);
-        p.ports = std::make_unique<PortsProvider>(providerConfig);
-        p.logTail = std::make_unique<LogTailProvider>(providerConfig);
-        p.worktrees = std::make_unique<WorktreesProvider>(providerConfig);
-        p.worktrees->OnSnapshot = [](WorktreesSnapshot const& s) { g_app.dashboard.Update(s); };
+        p.sessions = std::make_unique<SessionsProvider>(g_app.config);
         p.sessions->OnSnapshot = [](SessionsSnapshot const& s) { g_app.sessions = s; ForwardSessions(); };
-        p.github->OnSnapshot = [](PullRequestsSnapshot const& s) { g_app.ambient.Update(s); g_app.dashboard.Update(s); };
-        p.system->OnSnapshot = [](SystemSnapshot const& s) { g_app.ambient.Update(s); };
-        p.calendar->OnSnapshot = [](CalendarSnapshot const& s) { g_app.ambient.Update(s); g_app.dashboard.Update(s); };
-        p.ports->OnSnapshot = [](PortsSnapshot const& s) { g_app.dashboard.Update(s); };
-        p.logTail->OnSnapshot = [](LogTailSnapshot const& s) { g_app.dashboard.Update(s); };
         auto queue = g_app.scene.Queue();
         p.ForEach([&](Provider& provider) {
             provider.Start(queue, g_app.mock);
             Log(L"Provider '%s': %s", provider.Name().c_str(), provider.Enabled() ? (g_app.mock ? L"mock" : L"real") : L"disabled");
         });
     }
-    if (g_app.config.clipboard.enabled) StartClipboard();
-
-    g_app.desktops.OnChanged = [](VirtualDesktopInfo const& info) {
-        if (info.id == g_app.desktop.id) return;
-        g_app.desktop = info;
-        g_app.sceneOverride.clear();
-        Log(L"Virtual desktop switched to %d '%s' %s", info.index, info.name.c_str(), info.id.c_str());
-        ApplyScene();
-    };
-    g_app.desktops.Start(g_app.scene.Queue());
 
     g_app.reveal.Start(g_app.controller, WM_APP_REVEAL);
     EvaluateReveal();
@@ -1419,19 +1051,8 @@ int wmain(int argc, wchar_t** argv)
         DispatchMessageW(&msg);
     }
 
-    g_app.providers.ForEach([](Provider& p) { p.Stop(); });
-    g_app.providers = Providers{};
-    g_app.clipboard.Stop();
-    g_app.drop.Destroy();
-    g_app.stack.Shutdown();
-    g_app.dashboard.Shutdown();
-    g_app.ambient.Shutdown();
-    g_app.graphics.Shutdown();
-    g_app.scene.Shutdown();
-    if (ole) OleUninitialize();
-    if (g_app.icon) DestroyIcon(g_app.icon);
-    Log(L"Clean shutdown complete");
-    SetEvent(g_cleanupDone);
-    if (mutex) { ReleaseMutex(mutex); CloseHandle(mutex); }
-    return 0;
+    winrt::uninit_apartment();
+    if (g_cleanupDone) SetEvent(g_cleanupDone);
+    ReleaseMutex(mutex);
+    return static_cast<int>(msg.wParam);
 }

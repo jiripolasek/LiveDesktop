@@ -12,25 +12,10 @@ namespace ld
     namespace
     {
         constexpr char kDefaultConfig[] = R"({
-  "_comment": "LiveDesktop config. Restart LiveDesktop after editing. Empty 'repos' = all of your open PRs.",
+  "_comment": "LiveDesktop config. Restart LiveDesktop after editing.",
   "mock": false,
-  "repos": [],
   "providers": {
-    "sessions": { "enabled": true, "intervalSeconds": 4, "maxIdleHours": 8, "maxOrbs": 8 },
-    "github":   { "enabled": true, "intervalSeconds": 120 },
-    "system":   { "enabled": true, "intervalSeconds": 3 },
-    "calendar": { "enabled": true, "intervalSeconds": 300, "icsUrl": "" },
-    "ports":    { "enabled": true, "intervalSeconds": 10 },
-    "logTail":  { "enabled": false, "intervalSeconds": 2, "path": "", "lines": 6 },
-    "clipboard": { "enabled": true, "items": 12 },
-    "worktrees": { "enabled": true, "intervalSeconds": 30, "max": 5, "paths": [] }
-  },
-  "scenes": {
-    "default": "default",
-    "focusMinutes": 25,
-    "desktops": {
-      "_example {GUID} or name or index": "work"
-    }
+    "sessions": { "enabled": true, "intervalSeconds": 4, "maxIdleHours": 8, "maxOrbs": 8 }
   }
 }
 )";
@@ -51,16 +36,6 @@ namespace ld
             {
                 auto v = o.GetNamedValue(key);
                 if (v.ValueType() == wdj::JsonValueType::Boolean) return v.GetBoolean();
-            }
-            return fallback;
-        }
-
-        std::wstring String(wdj::JsonObject const& o, wchar_t const* key, std::wstring const& fallback)
-        {
-            if (o && o.HasKey(key))
-            {
-                auto v = o.GetNamedValue(key);
-                if (v.ValueType() == wdj::JsonValueType::String) return std::wstring(v.GetString());
             }
             return fallback;
         }
@@ -112,58 +87,14 @@ namespace ld
         }
 
         cfg.mock = Bool(root, L"mock", false);
-        if (root.HasKey(L"repos") && root.GetNamedValue(L"repos").ValueType() == wdj::JsonValueType::Array)
-        {
-            for (auto const& v : root.GetNamedArray(L"repos"))
-            {
-                if (v.ValueType() == wdj::JsonValueType::String && !v.GetString().empty()) cfg.repos.emplace_back(v.GetString());
-            }
-        }
 
         auto providers = Object(root, L"providers");
         ReadProvider(providers, L"sessions", cfg.sessions);
-        ReadProvider(providers, L"github", cfg.github);
-        ReadProvider(providers, L"system", cfg.system);
-        ReadProvider(providers, L"calendar", cfg.calendar);
-        ReadProvider(providers, L"ports", cfg.ports);
-        ReadProvider(providers, L"logTail", cfg.logTail);
         auto sessions = Object(providers, L"sessions");
         cfg.sessionMaxIdleHours = std::clamp(Number(sessions, L"maxIdleHours", cfg.sessionMaxIdleHours), 0.1, 24.0 * 30);
         cfg.maxOrbs = std::clamp(static_cast<int>(Number(sessions, L"maxOrbs", cfg.maxOrbs)), 1, 16);
-        cfg.icsUrl = String(Object(providers, L"calendar"), L"icsUrl", L"");
-        auto logTail = Object(providers, L"logTail");
-        cfg.logPath = String(logTail, L"path", L"");
-        cfg.logLines = std::clamp(static_cast<int>(Number(logTail, L"lines", cfg.logLines)), 1, 20);
-        auto clipboard = Object(providers, L"clipboard");
-        cfg.clipboard.enabled = Bool(clipboard, L"enabled", cfg.clipboard.enabled);
-        cfg.clipboardItems = std::clamp(static_cast<int>(Number(clipboard, L"items", cfg.clipboardItems)), 3, 24);
-        ReadProvider(providers, L"worktrees", cfg.worktrees);
-        cfg.worktrees.intervalSeconds = std::max(cfg.worktrees.intervalSeconds, 10);
-        auto worktrees = Object(providers, L"worktrees");
-        cfg.worktreeMax = std::clamp(static_cast<int>(Number(worktrees, L"max", cfg.worktreeMax)), 1, 8);
-        if (worktrees && worktrees.HasKey(L"paths") && worktrees.GetNamedValue(L"paths").ValueType() == wdj::JsonValueType::Array)
-        {
-            for (auto const& v : worktrees.GetNamedArray(L"paths"))
-            {
-                if (v.ValueType() == wdj::JsonValueType::String && !v.GetString().empty()) cfg.worktreePaths.emplace_back(v.GetString());
-            }
-        }
 
-        auto scenes = Object(root, L"scenes");
-        cfg.defaultScene = ToLower(String(scenes, L"default", cfg.defaultScene));
-        cfg.focusMinutes = std::clamp(static_cast<int>(Number(scenes, L"focusMinutes", cfg.focusMinutes)), 1, 240);
-        if (auto desktops = Object(scenes, L"desktops"))
-        {
-            for (auto const& kv : desktops)
-            {
-                std::wstring key(kv.Key());
-                if (key.empty() || key[0] == L'_' || kv.Value().ValueType() != wdj::JsonValueType::String) continue;
-                cfg.desktopScenes.emplace_back(ToLower(key), ToLower(std::wstring(kv.Value().GetString())));
-            }
-        }
-
-        Log(L"Config: %s (repos=%zu, mock=%d, default scene '%s', %zu desktop mappings)", cfg.path.c_str(),
-            cfg.repos.size(), cfg.mock ? 1 : 0, cfg.defaultScene.c_str(), cfg.desktopScenes.size());
+        Log(L"Config: %s (mock=%d, maxOrbs=%d)", cfg.path.c_str(), cfg.mock ? 1 : 0, cfg.maxOrbs);
         return cfg;
     }
 }

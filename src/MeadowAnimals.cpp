@@ -16,6 +16,7 @@ namespace ld
         constexpr float kTau = 6.2831853f;
         constexpr size_t kMaxAnimals = 10;
         constexpr float kLayerSplits[3] = { 1.0f, 1.45f, 1.8f };
+        constexpr float kChildScale = 0.6f; // relative size of a sub-agent "child" animal
 
         std::wstring F(wchar_t const* fmt, ...)
         {
@@ -59,6 +60,9 @@ namespace ld
         art::Rig const* rig = nullptr;
         Mode mode = Mode::Busy;
         bool leaving = false, journeying = false, hovered = false, bubble = false;
+        // Set when AgentSession::parentId pointed at a session that was alive at creation time; see
+        // SessionsProvider::LinkChildren. Child animals render smaller and spawn/leave near their parent.
+        bool isChild = false;
         uint64_t token = 0;
         int layer = -1, level = -1;
         float face = 1, slotX = 0;
@@ -366,6 +370,7 @@ namespace ld
         a.variant = static_cast<int>((h >> 8) % 4);
         a.seed = ((h >> 16) % 1000) / 1000.0f * kTau;
         a.rig = &art::RigFor(a.species);
+        a.isChild = !s.parentId.empty();
         auto const& rig = *a.rig;
         float U = m_U;
 
@@ -556,7 +561,7 @@ namespace ld
         a.root.StopAnimation(L"Offset");
         a.root.StopAnimation(L"Scale");
         a.p.StopAnimation(L"Haze");
-        float s = ScaleAt(d);
+        float s = ScaleAt(d) * (a.isChild ? kChildScale : 1.0f);
         a.root.Offset(float3(x, Y(d, x), 0));
         a.root.Scale(float3(s, s, 1));
         a.p.InsertScalar(L"Haze", HazeAt(d));
@@ -754,11 +759,37 @@ namespace ld
         Sparkles(a, 8, true);
     }
 
+    void MeadowAnimals::HopIn(Animal& a)
+    {
+        float U = m_U;
+        auto up = m_c.CreateCubicBezierEasingFunction(float2(0.2f, 0.7f), float2(0.4f, 1.0f));
+        auto down = m_c.CreateCubicBezierEasingFunction(float2(0.6f, 0.0f), float2(0.8f, 0.4f));
+        auto hop = m_c.CreateVector3KeyFrameAnimation();
+        hop.InsertKeyFrame(0.35f, float3(0, -0.6f * U, 0), up);
+        hop.InsertKeyFrame(0.8f, float3(0, 0, 0), down);
+        hop.Duration(Seconds(0.9f));
+        a.jumper.StartAnimation(L"Offset", hop);
+        Keys(a.p, L"Wave", { { 0.0f, 0.0f }, { 0.25f, 1.0f }, { 0.6f, 1.0f }, { 1.0f, 0.0f } }, 0.9f, false);
+    }
+
+    void MeadowAnimals::HopOut(Animal& a)
+    {
+        float U = m_U;
+        auto up = m_c.CreateCubicBezierEasingFunction(float2(0.2f, 0.7f), float2(0.4f, 1.0f));
+        auto down = m_c.CreateCubicBezierEasingFunction(float2(0.6f, 0.0f), float2(0.8f, 0.4f));
+        auto hop = m_c.CreateVector3KeyFrameAnimation();
+        hop.InsertKeyFrame(0.3f, float3(0, -0.45f * U, 0), up);
+        hop.InsertKeyFrame(0.65f, float3(0, 0, 0), down);
+        hop.Duration(Seconds(0.8f));
+        a.jumper.StartAnimation(L"Offset", hop);
+        Keys(a.p, L"Wave", { { 0.0f, 0.0f }, { 0.2f, 1.0f }, { 0.75f, 1.0f }, { 1.0f, 0.0f } }, 0.8f, false);
+    }
+
     void MeadowAnimals::Sparkles(Animal& a, int count, bool petals)
     {
         if (!m_stage.top) return;
         float2 at = PoseAt(a);
-        float s = ScaleAt(at.y);
+        float s = ScaleAt(at.y) * (a.isChild ? kChildScale : 1.0f);
         float3 c(at.x, Y(at.y, at.x) - a.rig->height * m_U * s * 0.8f - 0.45f * m_U * s, 0);
         auto batch = m_c.CreateScopedBatch(wuc::CompositionBatchTypes::Animation);
         std::vector<wuc::Visual> made;
@@ -1120,6 +1151,7 @@ namespace ld
         Animal& a = *it->second;
         a.leaving = true;
         a.token = m_nextToken++;
+        if (a.isChild) HopOut(a);
         To(a.root, L"Opacity", 0.0f, 1.0f);
         if (a.label) To(a.label, L"Opacity", 0.0f, 0.5f);
         After(1.1f, [this, id] {
@@ -1156,6 +1188,14 @@ namespace ld
                 Animal& a = Create(*s);
                 a.mode = Desired(*s);
                 float x = SlotFor(a, a.mode), d = DepthOf(a.mode);
+                // Spawn near the parent instead of the usual slot queue, when we can find it.
+                auto parentIt = a.isChild ? m_animals.find(s->parentId) : m_animals.end();
+                if (parentIt != m_animals.end())
+                {
+                    float2 at = PoseAt(*parentIt->second);
+                    x = at.x + ((Hash(s->id) & 1) ? 1.0f : -1.0f) * m_U * 1.1f;
+                    d = std::min(1.0f, at.y + 0.02f);
+                }
                 a.face = (Hash(s->id) & 2) ? 1.0f : -1.0f;
                 a.facing.Scale(float3(a.face, 1, 1));
                 Place(a, x, d);
@@ -1163,6 +1203,7 @@ namespace ld
                 To(a.root, L"Opacity", 1.0f, 1.2f);
                 a.token = m_nextToken++;
                 StartLoop(a);
+                if (a.isChild) HopIn(a);
                 Log(L"Meadow animals: + %s as %s/%d (%s)", Truncate(s->title, 30).c_str(), art::SpeciesName(a.species), a.variant, AgentStatusName(s->status));
                 continue;
             }
@@ -1242,7 +1283,7 @@ namespace ld
             if (a.leaving || a.layer < 0) continue;
             float2 at = PoseAt(a);
             if (at.y > 0.6f && at.y < 1.05f) continue; // behind the ground hill
-            float s = ScaleAt(at.y);
+            float s = ScaleAt(at.y) * (a.isChild ? kChildScale : 1.0f);
             float shift = (cx - host.x) * m_stage.parallax[std::clamp(LayerOf(at.y), 0, 3)] * strength;
             float fx = at.x + shift, fy = Y(at.y, at.x);
             float halfW = 1.2f * a.rig->rx * s * m_U + Px(4);
@@ -1296,7 +1337,7 @@ namespace ld
         if (it == m_animals.end() || !host) return;
         Animal& a = *it->second;
         float2 at = PoseAt(a);
-        float s = ScaleAt(at.y);
+        float s = ScaleAt(at.y) * (a.isChild ? kChildScale : 1.0f);
         float fx = at.x + m_stage.rc.left, fy = Y(at.y, at.x) + m_stage.rc.top;
         if (a.mode != Mode::Busy && !a.journeying)
         {

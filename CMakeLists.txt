@@ -17,7 +17,6 @@ add_executable(LiveDesktop
     src/DesktopHost.cpp
     src/DesktopIcons.cpp
     src/Scene.cpp
-    src/Effects.cpp
     src/Meadow.cpp
     src/MeadowAnimals.cpp
     src/MeadowAnimalsArt.cpp
@@ -26,18 +25,9 @@ add_executable(LiveDesktop
     src/Config.cpp
     src/Provider.cpp
     src/SessionsProvider.cpp
-    src/GitHubProvider.cpp
-    src/SystemProviders.cpp
-    src/CalendarProvider.cpp
     src/Visuals.cpp
     src/Graphics.cpp
-    src/Ambient.cpp
-    src/Dashboard.cpp
     src/Reveal.cpp
-    src/Clipboard.cpp
-    src/ClipboardStack.cpp
-    src/DropWindow.cpp
-    src/WorktreesProvider.cpp
     src/Snapshot.cpp
     src/LiveDesktop.manifest
 )

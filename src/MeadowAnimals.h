@@ -76,6 +76,8 @@ namespace ld
         Step Prepare(bool lying);
         Step Celebrate();
         void Happy(Animal& a);
+        void HopIn(Animal& a);   // small "just arrived" hop + wave for a newly spawned child animal
+        void HopOut(Animal& a);  // small "goodbye" wave played as a child animal despawns
         void Sparkles(Animal& a, int count, bool petals);
         void DrawParts(Animal& a);
         void DrawLabel(Animal& a);

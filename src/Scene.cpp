@@ -62,8 +62,8 @@ namespace ld
         m_strengthAnimation.InsertExpressionKeyFrame(1.0f, L"target", easeOut);
         m_strengthAnimation.Duration(450ms);
 
-        m_effects = CreateEffects();
-        Log(L"Compositor ready (%zu effects). GlobalPlaybackRate range [%.3f, %.3f]", m_effects.size(),
+        m_effect = CreateMeadowEffect();
+        Log(L"Compositor ready (%s). GlobalPlaybackRate range [%.3f, %.3f]", m_effect->Name(),
             wuc::Compositor::MinGlobalPlaybackRate(), wuc::Compositor::MaxGlobalPlaybackRate());
     }
 
@@ -95,83 +95,48 @@ namespace ld
         m_root.Size(size);
         m_effectRoot.Size(size);
         m_overlay.Size(size);
-        Rebuild(false);
+        Rebuild();
         if (OnResized) OnResized(size);
-    }
-
-    void Scene::NextEffect()
-    {
-        SetEffect((m_current + 1) % m_effects.size());
-    }
-
-    void Scene::SetEffect(size_t index)
-    {
-        if (!m_effects.empty()) m_effects[m_current]->Release();
-        m_current = index % m_effects.size();
-        Log(L"Effect -> %s", CurrentEffectName());
-        Rebuild(true);
-        if (OnEffectChanged) OnEffectChanged();
     }
 
     void Scene::UpdateSessions(SessionsSnapshot const& snapshot)
     {
         m_sessions = snapshot;
-        if (m_layer && !m_effects.empty()) m_effects[m_current]->UpdateSessions(snapshot);
+        if (m_layer) m_effect->UpdateSessions(snapshot);
     }
 
     std::optional<std::wstring> Scene::HitAgent(float2 pos) const
     {
-        if (!m_layer || m_paused || m_effects.empty()) return std::nullopt;
-        return m_effects[m_current]->HitAgent(pos);
+        if (!m_layer || m_paused) return std::nullopt;
+        return m_effect->HitAgent(pos);
     }
 
     void Scene::HoverAgent(std::optional<float2> pos)
     {
-        if (m_layer && !m_effects.empty()) m_effects[m_current]->HoverAgent(pos);
+        if (m_layer) m_effect->HoverAgent(pos);
     }
 
     int Scene::ActivateAgent(std::wstring const& id)
     {
-        if (!m_layer || m_effects.empty()) return 0;
-        return m_effects[m_current]->ActivateAgent(id);
+        if (!m_layer) return 0;
+        return m_effect->ActivateAgent(id);
     }
 
-    const wchar_t* Scene::CurrentEffectName() const
-    {
-        return m_effects.empty() ? L"" : m_effects[m_current]->Name();
-    }
-
-    void Scene::Rebuild(bool crossfade)
+    void Scene::Rebuild()
     {
         if (!m_root || m_ctx.size.x <= 0 || m_ctx.size.y <= 0) return;
         auto const& c = m_ctx.compositor;
 
         auto layer = c.CreateContainerVisual();
         layer.Size(m_ctx.size);
-        m_effects[m_current]->Build(m_ctx, layer);
-        if (m_sessions) m_effects[m_current]->UpdateSessions(*m_sessions);
+        m_effect->Build(m_ctx, layer);
+        if (m_sessions) m_effect->UpdateSessions(*m_sessions);
 
         auto old = m_layer;
         m_layer = layer;
         m_effectRoot.Children().InsertAtTop(layer);
 
-        if (old && crossfade)
-        {
-            auto fadeIn = c.CreateScalarKeyFrameAnimation();
-            fadeIn.InsertKeyFrame(0.0f, 0.0f);
-            fadeIn.InsertKeyFrame(1.0f, 1.0f);
-            fadeIn.Duration(900ms);
-            auto batch = c.CreateScopedBatch(wuc::CompositionBatchTypes::Animation);
-            layer.StartAnimation(L"Opacity", fadeIn);
-            batch.End();
-            auto root = m_effectRoot;
-            batch.Completed([root, old](auto&&, auto&&)
-            {
-                root.Children().Remove(old);
-                CloseTree(old);
-            });
-        }
-        else if (old)
+        if (old)
         {
             m_effectRoot.Children().Remove(old);
             CloseTree(old);
@@ -205,18 +170,18 @@ namespace ld
 
     void Scene::Click(float2 pos)
     {
-        if (m_layer && !m_paused) m_effects[m_current]->OnClick(m_ctx, m_layer, pos);
+        if (m_layer && !m_paused) m_effect->OnClick(m_ctx, m_layer, pos);
     }
 
     void Scene::Tick()
     {
-        if (m_layer && !m_paused) m_effects[m_current]->Tick(m_ctx, m_layer, false);
+        if (m_layer && !m_paused) m_effect->Tick(m_ctx, m_layer, false);
     }
 
     void Scene::SetTimeOverride(float hour)
     {
         m_ctx.timeOverride = hour;
-        if (m_layer) m_effects[m_current]->Tick(m_ctx, m_layer, true);
+        if (m_layer) m_effect->Tick(m_ctx, m_layer, true);
     }
 
     void Scene::SetPaused(bool paused)
@@ -230,13 +195,13 @@ namespace ld
     void Scene::Shutdown()
     {
         DetachFromWindow();
-        for (auto& effect : m_effects) effect->Release();
+        if (m_effect) m_effect->Release();
         if (m_layer)
         {
             CloseTree(m_layer);
             m_layer = nullptr;
         }
-        m_effects.clear();
+        m_effect.reset();
         m_followAnimation = nullptr;
         m_strengthAnimation = nullptr;
         if (m_overlay) { CloseTree(m_overlay); m_overlay = nullptr; }

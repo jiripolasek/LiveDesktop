@@ -95,6 +95,7 @@ namespace ld
     {
         std::wstring id;
         std::wstring dir;
+        TimePoint created{}; // session-state directory creation time; used for the parent/child heuristic
         // workspace.yaml
         FILETIME workspaceTime{};
         std::wstring title, repo, branch;
@@ -381,6 +382,37 @@ namespace ld
         }
     };
 
+    // Best-effort parent/child heuristic: there is no explicit linkage field anywhere in a
+    // session's on-disk state, so we infer it purely from directory creation order. Within each
+    // non-empty repo, the earliest-created session is treated as the "root"; any sibling created
+    // later in the same repo while the root is still live is treated as a child spawned by it.
+    // This only produces one level of nesting and can be wrong (e.g. two unrelated sessions
+    // opened back-to-back in the same repo) - it is a visual approximation, not a source of truth.
+    void SessionsProvider::LinkChildren(std::vector<AgentSession>& sessions, std::map<std::wstring, TimePoint> const& created)
+    {
+        constexpr auto kSpawnWindow = minutes(30); // ignore gaps larger than this
+        std::map<std::wstring, std::vector<AgentSession*>> byRepo;
+        for (auto& s : sessions)
+        {
+            if (!s.repo.empty()) byRepo[s.repo].push_back(&s);
+        }
+        for (auto& [repo, group] : byRepo)
+        {
+            if (group.size() < 2) continue;
+            std::sort(group.begin(), group.end(), [&](AgentSession const* a, AgentSession const* b)
+            {
+                return created.at(a->id) < created.at(b->id);
+            });
+            AgentSession* root = group.front();
+            for (size_t i = 1; i < group.size(); ++i)
+            {
+                AgentSession* child = group[i];
+                auto gap = created.at(child->id) - created.at(root->id);
+                if (root->live && gap > TimePoint::duration::zero() && gap < kSpawnWindow) child->parentId = root->id;
+            }
+        }
+    }
+
     SessionsProvider::SessionsProvider(Config const& config)
         : SnapshotProvider(L"sessions", config.sessions), m_maxIdleHours(config.sessionMaxIdleHours), m_maxOrbs(config.maxOrbs)
     {
@@ -428,6 +460,7 @@ namespace ld
                 auto t = std::make_unique<Tracked>();
                 t->id = fd.cFileName;
                 t->dir = dir;
+                t->created = FromFileTime(fd.ftCreationTime);
                 m_tracked.emplace(fd.cFileName, std::move(t));
             }
         } while (FindNextFileW(find, &fd));
@@ -451,6 +484,7 @@ namespace ld
         auto now = Clock::now();
         auto maxIdle = duration_cast<Clock::duration>(duration<double, std::ratio<3600>>(m_maxIdleHours));
         SessionsSnapshot snap;
+        std::map<std::wstring, TimePoint> created;
         for (auto& [id, t] : m_tracked)
         {
             if (Stopping()) return true;
@@ -459,8 +493,10 @@ namespace ld
             t->CheckLive();
             auto s = t->Snapshot(now);
             if (s.status == AgentStatus::Idle && !s.live && now - s.lastActivity > maxIdle) continue;
+            created[s.id] = t->created;
             snap.sessions.push_back(std::move(s));
         }
+        LinkChildren(snap.sessions, created);
         std::sort(snap.sessions.begin(), snap.sessions.end(), [](AgentSession const& a, AgentSession const& b)
         {
             return a.lastActivity > b.lastActivity;
@@ -490,13 +526,16 @@ namespace ld
         struct MockSession
         {
             const wchar_t* id; const wchar_t* title; const wchar_t* repo; const wchar_t* branch;
-            int offset; std::vector<Phase> phases;
+            int offset; std::vector<Phase> phases; const wchar_t* parentId = nullptr;
         };
         static const std::vector<MockSession> sessions = {
             { L"7d1f2c9a-0000-4000-8000-000000000001", L"Add dark mode to settings page", L"contoso/portal", L"feat/dark-mode", 0,
               { { AgentStatus::Waiting, 75, L"Approve plan: migrate theme tokens to CSS vars?" }, { AgentStatus::Working, 45, L"Running edit" }, { AgentStatus::Done, 50, L"Task complete" } } },
             { L"7d1f2c9a-0000-4000-8000-000000000002", L"Fix flaky checkout integration tests", L"contoso/storefront", L"fix/flaky-checkout", 10,
               { { AgentStatus::Working, 55, L"Running npm test" }, { AgentStatus::Done, 45, L"Task complete" }, { AgentStatus::Working, 40, L"Running powershell" } } },
+            { L"7d1f2c9a-0000-4000-8000-00000000000a", L"Rerun just the checkout flaky tests", L"contoso/storefront", L"fix/flaky-checkout", 10,
+              { { AgentStatus::Working, 55, L"Running npm test" }, { AgentStatus::Done, 45, L"Task complete" }, { AgentStatus::Working, 40, L"Running powershell" } },
+              L"7d1f2c9a-0000-4000-8000-000000000002" },
             { L"7d1f2c9a-0000-4000-8000-000000000003", L"Investigate memory leak in queue worker", L"contoso/pipeline", L"main", 0,
               { { AgentStatus::Working, 110, L"Running dotnet-counters" }, { AgentStatus::Waiting, 40, L"Which heap dump should I analyze?" } } },
             { L"7d1f2c9a-0000-4000-8000-000000000004", L"Draft release notes for v2.4", L"contoso/docs", L"release/2.4", 0,
@@ -504,7 +543,7 @@ namespace ld
             { L"7d1f2c9a-0000-4000-8000-000000000005", L"Bump dependencies and regenerate lockfiles", L"contoso/infra", L"chore/deps", 0,
               { { AgentStatus::Idle, 100000, L"" } } },
         };
-        static const int staticAgeSeconds[] = { 0, 0, 0, 14 * 60, 3 * 3600 + 20 * 60 };
+        static const int staticAgeSeconds[] = { 0, 0, 0, 0, 14 * 60, 3 * 3600 + 20 * 60 };
 
         auto now = Clock::now();
         auto elapsed = static_cast<int>(duration_cast<seconds>(steady_clock::now() - m_mockStart).count());
@@ -528,6 +567,7 @@ namespace ld
             s.title = m.title;
             s.repo = m.repo;
             s.branch = m.branch;
+            if (m.parentId) s.parentId = m.parentId;
             s.status = phase->status;
             s.detail = phase->detail;
             s.live = phase->status != AgentStatus::Idle;
