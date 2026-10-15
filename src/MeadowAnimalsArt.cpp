@@ -790,6 +790,13 @@ namespace ld::animals
                     auto ear = p.Smooth({ { -eW * 0.5f, 0.02f }, { -eW * 0.08f, -eL * 0.95f },
                         { eW * 0.55f, -eL * 0.4f }, { eW * 0.42f, 0.05f } }, true);
                     p.Fill(ear, p.Vert(-eL, 0.05f, ScaleRgb(c.body, 1.05f), ScaleRgb(c.body, 0.82f)).get());
+                    // Fold-crease outline: against a black skull the ear fill alone is the same
+                    // near-black value and disappears into the head. A crisp dark contour around
+                    // the ear (and a thin highlight along its leading fold) makes it read as its
+                    // own small, separate, folded-down shape instead of one big round head blob.
+                    p.Stroke(ear, p.Solid(ScaleRgb(c.body, 0.42f), 0.85f).get(), 0.012f);
+                    p.Stroke(p.Smooth({ { -eW * 0.42f, -0.01f }, { -eW * 0.1f, -eL * 0.85f } }, false),
+                        p.Solid(MixRgb(c.body, 0xFFFFFF, 0.3f), 0.5f).get(), 0.008f);
                     break;
                 }
                 // Floppy, hanging ear: wider near the head, rounding to a soft tip, shaded toward
@@ -829,7 +836,11 @@ namespace ld::animals
             case Dog:
                 if (v == 0)
                     // Rottweiler: short, stubby docked-looking tail rather than a long sweeping one.
-                    p.Dot({ -0.015f, -0.025f }, 0.052f, 0.046f, p.Vert(-0.07f, 0.02f, ScaleRgb(c.body, 1.05f), ScaleRgb(c.body, 0.82f)).get());
+                    // Offset further out from the tail anchor than a plain small dot would need —
+                    // the Rottweiler's extra-broad/deep body (see DrawBody) otherwise swallows a
+                    // centered stub completely, so it has to clear the enlarged rump to be visible
+                    // as a short tail peeking out at all, rather than reading as no tail.
+                    p.Dot({ -0.085f, -0.01f }, 0.055f, 0.048f, p.Vert(-0.07f, 0.02f, ScaleRgb(c.body, 1.05f), ScaleRgb(c.body, 0.82f)).get());
                 else
                     p.Stroke(p.Smooth({ { 0.02f, 0.0f }, { -0.1f, -0.08f }, { -0.16f, -0.2f }, { -0.1f, -0.32f }, { -0.01f, -0.36f } }, false),
                         p.Solid(c.body).get(), 0.065f);
