@@ -683,18 +683,35 @@ namespace ld::animals
             }
             case Dog:
             {
-                auto skull = p.Ell({ 0.04f, -0.09f }, 0.15f, 0.13f);
-                auto snout = p.Smooth({ { 0.08f, -0.12f }, { 0.2f, -0.07f }, { 0.29f, -0.01f }, { 0.2f, 0.06f }, { 0.06f, 0.065f } }, true);
+                // The Rottweiler reads as a slightly older, heavier-jowled dog: a touch more
+                // skull/snout bulk than the doodles, so it's not just the same head recolored.
+                float skullR = v == 0 ? 0.16f : 0.15f;
+                auto skull = p.Ell({ 0.04f, -0.09f }, skullR, 0.135f);
+                auto snout = p.Smooth(v == 0
+                    ? std::vector<float2>{ { 0.07f, -0.12f }, { 0.19f, -0.065f }, { 0.28f, -0.005f }, { 0.22f, 0.07f }, { 0.05f, 0.075f } }
+                    : std::vector<float2>{ { 0.08f, -0.12f }, { 0.2f, -0.07f }, { 0.29f, -0.01f }, { 0.2f, 0.06f }, { 0.06f, 0.065f } }, true);
                 p.Volume(skull, -0.21f, 0.07f, c.body);
-                p.Fill(snout, p.Vert(-0.1f, 0.065f, MixRgb(c.belly, 0xFFFFFF, 0.08f), ScaleRgb(c.belly, 0.95f)).get());
-                p.Dot({ 0.285f, -0.015f }, 0.026f, 0.021f, p.Solid(c.dark).get());
+                if (v == 0)
+                {
+                    // Black mask on top of the muzzle with a tan lower jaw/chin and tan cheek
+                    // patch — the breed's signature two-tone face, not an all-tan snout.
+                    p.Fill(snout, p.Vert(-0.1f, 0.075f, ScaleRgb(c.body, 1.05f), c.dark).get());
+                    p.Fill(p.Intersect(snout.get(), p.Ell({ 0.16f, 0.045f }, 0.15f, 0.045f).get()), p.Solid(c.belly).get());
+                    p.Fill(p.Intersect(skull.get(), p.Ell({ -0.07f, -0.02f }, 0.055f, 0.04f).get()), p.Solid(c.belly, 0.85f).get());
+                }
+                else
+                {
+                    p.Fill(snout, p.Vert(-0.1f, 0.065f, MixRgb(c.belly, 0xFFFFFF, 0.08f), ScaleRgb(c.belly, 0.95f)).get());
+                }
+                p.Dot({ v == 0 ? 0.275f : 0.285f, -0.015f }, 0.026f, 0.021f, p.Solid(c.dark).get());
                 p.Eye(r.eye, r.eyeR, c.iris, false);
                 if (v == 0 || v == 3)
                 {
-                    // Rottweiler/chocolate-lab tan eyebrow dots above the eyes.
+                    // Rottweiler/chocolate-lab tan eyebrow dots above the eyes — bigger and set a
+                    // touch higher on the Rottweiler, its classic "worried" eyebrow marking.
                     auto brow = p.Solid(c.belly);
-                    p.Dot({ 0.06f, -0.145f }, 0.018f, 0.014f, brow.get());
-                    p.Dot({ 0.17f, -0.14f }, 0.018f, 0.014f, brow.get());
+                    p.Dot({ 0.055f, -0.15f }, v == 0 ? 0.021f : 0.018f, v == 0 ? 0.015f : 0.014f, brow.get());
+                    p.Dot({ 0.17f, -0.145f }, v == 0 ? 0.021f : 0.018f, v == 0 ? 0.015f : 0.014f, brow.get());
                 }
                 else
                 {
@@ -702,6 +719,17 @@ namespace ld::animals
                     auto curl = p.Solid(c.extra, 0.6f);
                     for (auto at : { float2(-0.06f, -0.1f), float2(-0.02f, -0.16f), float2(0.02f, -0.19f) })
                         p.Dot({ at.x, at.y }, 0.026f, 0.026f, curl.get());
+                }
+                if (v == 0)
+                {
+                    // A dusting of grizzled grey around the muzzle and chin so it reads as an
+                    // older dog rather than a puppy.
+                    auto grey = p.Solid(0xBDB6AD, 0.55f);
+                    p.Dot({ 0.1f, 0.045f }, 0.022f, 0.015f, grey.get());
+                    p.Dot({ 0.17f, 0.04f }, 0.018f, 0.013f, grey.get());
+                    p.Dot({ -0.01f, -0.02f }, 0.016f, 0.012f, grey.get());
+                    // A soft jowl fold line under the muzzle for a looser, older look.
+                    p.Stroke(p.Smooth({ { 0.1f, 0.055f }, { 0.19f, 0.058f } }, false), p.Solid(ScaleRgb(c.dark, 1.3f), 0.5f).get(), 0.008f);
                 }
                 p.Blush({ 0.14f, 0.02f }, 0.028f, c.accent, 0.3f);
                 break;
