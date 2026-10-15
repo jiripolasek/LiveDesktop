@@ -1,0 +1,112 @@
+name: Release
+
+# Builds a Release binary, packages it as an unsigned/self-signed MSIX plus a portable
+# zip fallback, and attaches both to a GitHub Release. Runs on tags like "v1.2.3".
+#
+# This is an open-source project with no Microsoft Store / EV code-signing certificate, so
+# the MSIX is signed in CI with a throwaway self-signed certificate. See the "Installing a
+# release build" section of the README for how to trust it (or build locally for a signature
+# tied to your own machine).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (Release)
+        shell: cmd
+        run: build.cmd Release
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          & .\build\LiveDesktop.exe --mock --exit-after 3
+          if ($LASTEXITCODE -ne 0) {
+            throw "LiveDesktop exited with code $LASTEXITCODE"
+          }
+
+      - name: Compute version from tag
+        id: ver
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart('v')
+          # MSIX requires a strict 4-part numeric version.
+          $parts = $version.Split('.')
+          while ($parts.Count -lt 4) { $parts += '0' }
+          $msixVersion = ($parts[0..3] -join '.')
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "msixVersion=$msixVersion" >> $env:GITHUB_OUTPUT
+
+      - name: Build portable zip
+        shell: pwsh
+        run: |
+          $name = "LiveDesktop-${{ steps.ver.outputs.version }}-win64"
+          New-Item -ItemType Directory -Force -Path "dist\$name" | Out-Null
+          Copy-Item build\LiveDesktop.exe "dist\$name\"
+          Copy-Item README.md, LICENSE "dist\$name\"
+          Compress-Archive -Path "dist\$name\*" -DestinationPath "dist\$name.zip"
+
+      - name: Stage MSIX package layout
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path pkg\Assets | Out-Null
+          Copy-Item build\LiveDesktop.exe pkg\
+          Copy-Item packaging\AppxManifest.xml pkg\
+          Copy-Item packaging\assets\*.png pkg\Assets\
+          (Get-Content pkg\AppxManifest.xml) `
+            -replace 'Version="0\.1\.0\.0"', ('Version="' + "${{ steps.ver.outputs.msixVersion }}" + '"') |
+            Set-Content pkg\AppxManifest.xml
+
+      - name: Locate Windows SDK tools
+        id: sdk
+        shell: pwsh
+        run: |
+          $kits = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Directory |
+            Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+            Sort-Object { [version]$_.Name } -Descending
+          $bin = Join-Path $kits[0].FullName "x64"
+          "bin=$bin" >> $env:GITHUB_OUTPUT
+
+      - name: Pack MSIX
+        shell: pwsh
+        run: |
+          $makeappx = Join-Path "${{ steps.sdk.outputs.bin }}" "makeappx.exe"
+          & $makeappx pack /d pkg /p "dist\LiveDesktop-${{ steps.ver.outputs.version }}.msix" /overwrite
+          if ($LASTEXITCODE -ne 0) { throw "makeappx failed with exit code $LASTEXITCODE" }
+
+      - name: Self-sign MSIX (throwaway dev certificate)
+        shell: pwsh
+        run: |
+          $signtool = Join-Path "${{ steps.sdk.outputs.bin }}" "signtool.exe"
+          $cert = New-SelfSignedCertificate `
+            -Type Custom -Subject "CN=LiveDesktop" -KeyUsage DigitalSignature `
+            -FriendlyName "LiveDesktop CI dev certificate (unsigned/self-signed, not for trust)" `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
+          $pwd = ConvertTo-SecureString -String ([System.Guid]::NewGuid().ToString("N")) -Force -AsPlainText
+          $pfxPath = "dist\LiveDesktop-dev-cert.pfx"
+          Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $pwd | Out-Null
+          Export-Certificate -Cert $cert -FilePath "dist\LiveDesktop-dev-cert.cer" | Out-Null
+          & $signtool sign /fd SHA256 /a /f $pfxPath /p (ConvertFrom-SecureString $pwd -AsPlainText) `
+            "dist\LiveDesktop-${{ steps.ver.outputs.version }}.msix"
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
+          Remove-Item $pfxPath
+          # Keep only the public .cer so users can optionally trust this release's signing cert.
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/LiveDesktop-${{ steps.ver.outputs.version }}.msix
+            dist/LiveDesktop-dev-cert.cer
+            dist/LiveDesktop-${{ steps.ver.outputs.version }}-win64.zip
+          generate_release_notes: true

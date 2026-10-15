@@ -72,6 +72,27 @@ build\LiveDesktop.exe --help
 Only one instance runs at a time. Nothing is written to the registry or any system setting. The only
 file LiveDesktop writes, besides its log, is its own config (below).
 
+## Installing a release build
+
+Tagged releases (`vX.Y.Z`) are built by [CI](.github/workflows/release.yml) and published on the
+[Releases](../../releases) page as two downloads:
+
+- **`LiveDesktop-X.Y.Z.msix`** - an MSIX package. This repo has no Microsoft Store or EV code-signing
+  certificate, so CI signs it with a throwaway, self-signed certificate generated fresh for that build
+  (not reused between releases, not secret, not meant to establish trust by itself). Windows will refuse
+  to install an app signed by a certificate it doesn't trust, so pick one:
+  - **Trust the release's certificate**: download the matching `LiveDesktop-dev-cert.cer` from the same
+    release, double-click it, choose **Install Certificate** → **Local Machine** → **Place all
+    certificates in the following store** → **Trusted People**, then install the `.msix` normally.
+  - **Enable sideloading** instead of trusting a specific cert: **Settings → Privacy & security → For
+    developers** → turn on **Developer Mode** (or just **Install unsigned apps**, on newer builds), then
+    install the `.msix`.
+  - **Build it yourself** (see [Build](#build) above) - a locally built MSIX only matters if you set up
+    your own certificate, so this is really the same as running `build\LiveDesktop.exe` directly.
+- **`LiveDesktop-X.Y.Z-win64.zip`** - a portable zip with the plain `.exe`. No install, no signing, no
+  certificate prompts - unzip and run `LiveDesktop.exe`. This is the simplest option if you don't want to
+  deal with MSIX trust at all.
+
 ## How it works
 
 ### 1. Getting behind the icons (the "WorkerW" trick)
